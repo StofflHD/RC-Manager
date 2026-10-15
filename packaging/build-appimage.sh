@@ -55,7 +55,10 @@ ln -sf rc-manager.png "$APPDIR/.DirIcon"
 
 if [ "${BUNDLE_TOOLS:-0}" = "1" ]; then
     FREERDP_PREFIX="${FREERDP_PREFIX:-/opt/freerdp}"
-    XFREERDP="$(ls "$FREERDP_PREFIX"/bin/xfreerdp3 "$FREERDP_PREFIX"/bin/xfreerdp 2>/dev/null | head -1)"
+    XFREERDP=""
+    for name in xfreerdp3 xfreerdp; do
+        if [ -x "$FREERDP_PREFIX/bin/$name" ]; then XFREERDP="$FREERDP_PREFIX/bin/$name"; break; fi
+    done
     VNCVIEWER="$(readlink -f "$(command -v vncviewer)")"
     SSHPASS="$(command -v sshpass)"
     for b in "$XFREERDP" "$VNCVIEWER" "$SSHPASS"; do
