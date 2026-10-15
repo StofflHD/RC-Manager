@@ -679,8 +679,7 @@ pub fn is_credential_prompt(text: &str) -> bool {
     const ASKS: [&str; 8] =
         ["Username:", "Domain:", "Password:", "GatewayUsername:", "GatewayDomain:", "GatewayPassword:", "Smartcard-Pin:", "FIDO2 PIN:"];
     let t = text.trim();
-    ASKS.iter().any(|a| t == *a || t.ends_with(&format!("
-{a}")))
+    ASKS.iter().any(|a| t == *a || t.ends_with(&format!("\n{a}")))
 }
 
 /// Messages that would bury or contradict the important ones: FreeRDP lists every key of the
