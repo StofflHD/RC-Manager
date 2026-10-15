@@ -670,7 +670,17 @@ pub struct Spawned {
 
 /// Questions that end without a line break and wait for input.
 fn is_prompt(text: &str) -> bool {
-    text.contains("(Y/T/N)") || text.contains("(Y/N)")
+    text.contains("(Y/T/N)") || text.contains("(Y/N)") || is_credential_prompt(text)
+}
+
+/// FreeRDP asks on its console for missing credentials ("Username:        ", "Password: …",
+/// gateway and smartcard variants), e.g. when the server requires NLA and no user is given.
+pub fn is_credential_prompt(text: &str) -> bool {
+    const ASKS: [&str; 8] =
+        ["Username:", "Domain:", "Password:", "GatewayUsername:", "GatewayDomain:", "GatewayPassword:", "Smartcard-Pin:", "FIDO2 PIN:"];
+    let t = text.trim();
+    ASKS.iter().any(|a| t == *a || t.ends_with(&format!("
+{a}")))
 }
 
 /// Messages that would bury or contradict the important ones: FreeRDP lists every key of the
@@ -803,6 +813,14 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_prompts_are_detected() {
+        assert!(is_prompt("Username:        "));
+        assert!(is_prompt("GatewayPassword: "));
+        assert!(!is_prompt("Username: admin"));
+        assert!(!is_prompt("Domain:          FIRMA"));
+    }
 
     #[test]
     fn freerdp_noise_is_hidden() {
