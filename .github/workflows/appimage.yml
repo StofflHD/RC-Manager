@@ -187,6 +187,7 @@ jobs:
           # differs from the trusted one (screenshot 6).
           kill $SHADOW || true
           sleep 2
+          rm -rf "$HOME/.config/freerdp"   # the shadow server keeps its certificate there
           DISPLAY=:98 freerdp-shadow-cli /port:3390 -auth > gui/shadow2.log 2>&1 &
           sleep 4
           squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp3.log 2>&1 &

@@ -16,9 +16,11 @@ then keeps the active sessions and a counter of new warnings visible.
 | Feature | Original (Windows) | Linux version |
 |---|---|---|
 | Folder tree, search, sort order | ✔ | ✔ |
-| RDP | embedded MSTSC ActiveX | FreeRDP 3 (or 2) in its own window |
-| SSH / Telnet | embedded PuTTY | `ssh`/`telnet` in a terminal, password via `sshpass` |
-| VNC | UltraVNC/TightVNC | TigerVNC `vncviewer` (password file) |
+| Sessions as tabs, scaled with the window | ✔ | ✔ (X11/XWayland) |
+| RDP | embedded MSTSC ActiveX | FreeRDP 3 drawn into the tab; remote resolution follows the tab or the desktop is scaled |
+| SSH / Telnet | embedded PuTTY | `ssh`/`telnet` in an xterm inside the tab, password via `sshpass` |
+| VNC | UltraVNC/TightVNC | TigerVNC `vncviewer`, its window moved into the tab |
+| Certificate check | warning dialog (default: none) | dialog with details; trusted fingerprints are remembered |
 | Web | embedded Chromium (CEF) | default browser (`xdg-open`) |
 | External programs with placeholders | ✔ | ✔ (`{T} {PORT} {N} {U} {D} {P}`) |
 | Credentials, inheritance via folders | ✔ (per protocol) | ✔ (one set per folder) |
@@ -28,7 +30,40 @@ then keeps the active sessions and a counter of new warnings visible.
 | **Import of the Windows database** | – | ✔ including passwords and settings |
 | Light / dark theme | – | ✔ |
 | Backups (ZIP) of the Windows RDP-Manager | create/restore | import |
-| Tabs with embedded sessions, Hyper-V dashboard, key sequences, session/task manager, plugins (AD import, SCCM, MSRA, port scanner) | ✔ | ✘ (Windows-specific or not ported) |
+| Hyper-V dashboard, key sequences, session/task manager, plugins (AD import, SCCM, MSRA, port scanner) | ✔ | ✘ (Windows-specific or not ported) |
+
+## Sessions in tabs
+
+RDP, SSH/Telnet and VNC sessions open as tabs next to the connection properties and follow
+the window size, like in the original:
+
+* **RDP** – FreeRDP draws into the tab (`/parent-window`). With *Display → Adapt the remote
+  resolution to the window size* (default) the remote desktop gets the size of the tab and
+  follows every resize (needs Windows 8.1 / Server 2012 R2 or newer); without it, the desktop
+  (fixed resolution or the tab size) is scaled into the tab.
+* **SSH/Telnet** – an xterm inside the tab, coloured like the light or dark theme.
+* **VNC** – TigerVNC's window is moved into the tab; the remote desktop is resized if the
+  server supports it, otherwise shown centred (TigerVNC cannot scale).
+
+Click into a session to type there; a click anywhere in RC Manager takes the keyboard back.
+A session is hidden while a menu, dialog or the sidebar overlay covers it. Close a session with
+✖ or a middle click on its tab. *Options → Open Sessions in Tabs* switches back to separate
+windows; the window mode of an RDP connection (*Tab*, *Separate window*, *Full screen*) applies
+per connection. `rc-manager --connect <name>` opens connections at start.
+
+Embedding uses X11: on Wayland desktops RC Manager runs via XWayland, which GNOME, KDE and
+others provide (`RC_MANAGER_WAYLAND=1` forces native Wayland; sessions then open in separate
+windows).
+
+### Server certificates
+
+If FreeRDP cannot verify a server certificate (self-signed, wrong name), RC Manager shows its
+details – common name, validity, SHA-256 fingerprint – with *Trust once*, *Trust always* and
+*Cancel connection*. *Trust always* stores the fingerprint for this host and port in RC
+Manager's database; later connections accept exactly this certificate without asking. If the
+server presents a different certificate later, the dialog appears again with a prominent
+warning. FreeRDP runs with its own configuration directory below RC Manager's data, so its
+certificate store is not used.
 
 ## Installation (AppImage)
 
@@ -39,9 +74,9 @@ chmod +x RC-Manager-*-x86_64.AppImage
 ./RC-Manager-*-x86_64.AppImage
 ```
 
-The AppImage contains **FreeRDP 3**, the **TigerVNC** viewer and **sshpass**, so nothing else
-needs to be installed – except a terminal emulator and `ssh` for SSH/Telnet, which every desktop
-has. It needs glibc ≥ 2.35 (Ubuntu 22.04, Debian 12, Fedora 36 or newer) and X11 or Wayland.
+The AppImage contains **FreeRDP 3**, the **TigerVNC** viewer, **xterm** and **sshpass**, so
+nothing else needs to be installed – except `ssh` (and a terminal emulator if sessions are opened
+in separate windows), which every desktop has. It needs glibc ≥ 2.35 (Ubuntu 22.04, Debian 12, Fedora 36 or newer) and X11 or Wayland.
 If a bundled client cannot run on a system, RC Manager uses the installed one instead;
 `rc-manager --tools` (or *Options → External Programs*) shows which clients are used.
 
@@ -135,6 +170,9 @@ Hardening in this version:
 * Host names are validated (no leading `-`, no spaces or shell characters) before they are passed
   to ssh, telnet, vncviewer, FreeRDP or `{T}`; ssh additionally gets `--` before the host.
 * Web connections only open `http://` and `https://` URLs.
+* FreeRDP 3 gets its arguments via an environment variable (readable only by the user), so
+  stdin stays free for certificate questions; with sshpass, ssh accepts new host keys on first
+  use (`StrictHostKeyChecking=accept-new`) but still refuses changed ones.
 * Passwords never appear on the command line with FreeRDP 3, sshpass and vncviewer; temporary
   password files are created exclusively (`O_EXCL`, mode 0600) and removed after 20 s or on exit.
 * The data directory is mode 0700, the database 0600 (host and user names are stored in plain text).
@@ -158,6 +196,7 @@ src/model.rs           folders, connections, credentials
 src/store.rs           SQLite storage
 src/vault.rs           password encryption
 src/launch.rs          starting FreeRDP, ssh, vncviewer, the browser
+src/embed.rs           X11 embedding of sessions into tabs
 src/net.rs             Wake-on-LAN, port check
 src/legacy/crypto.rs   .NET PasswordDeriveBytes + AES (passwords of the original)
 src/legacy/nrbf.rs     reader for .NET BinaryFormatter blobs (settings of the original)
