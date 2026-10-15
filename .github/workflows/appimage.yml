@@ -32,7 +32,7 @@ jobs:
             libxkbfile-dev libxi-dev libxrandr-dev libxrender-dev libxfixes-dev libxtst-dev \
             libxkbcommon-dev libxkbcommon-x11-0 libasound2-dev libpulse-dev libcups2-dev libpcsclite-dev \
             tigervnc-viewer sshpass xterm \
-            xvfb freerdp2-shadow-x11 x11-apps x11-xserver-utils imagemagick xdotool x11-utils libgl1-mesa-dri libegl1
+            xvfb freerdp2-shadow-x11 x11vnc x11-apps x11-xserver-utils imagemagick xdotool x11-utils libgl1-mesa-dri libegl1
 
       - name: Cache FreeRDP
         id: freerdp-cache
@@ -118,6 +118,12 @@ jobs:
           db.execute("UPDATE Connections SET Target='127.0.0.1:3390' WHERE Name = 'DC01'")
           db.execute("UPDATE Connections SET Target='127.0.0.1' WHERE Name = 'Linux-Box'")
           db.execute("DELETE FROM FolderSetting")
+          # A VNC connection (original's VNC type) to x11vnc on display :98.
+          db.execute("""INSERT INTO Connections (Id, Name, Target, Sorting, Icon, Color, Parent, Setting, Credential, Type, Deleted)
+                        VALUES ('eeeeeeee-0000-0000-0000-000000000009', 'VNC-Test', '127.0.0.1', 0,
+                                'CB253433-7C84-48E4-8675-599024761E68', 0, '11111111-1111-1111-1111-111111111111',
+                                'e338af54-19fb-4875-b752-8b6f035764d6', 'cccccccc-0000-0000-0000-000000000002',
+                                'BEC8FD2B-680F-446D-9CF9-DED005C41F8E', 0)""")
           db.commit()
           EOF
           mkdir -p gui
@@ -128,6 +134,7 @@ jobs:
           DISPLAY=:98 xclock -geometry 300x300+60+60 -update 1 &
           DISPLAY=:98 xterm -geometry 70x20+420+60 -bg navy -fg white -e sh -c 'echo "Remote desktop via RDP"; while true; do date; sleep 1; done' &
           DISPLAY=:98 freerdp-shadow-cli /port:3390 -auth > gui/shadow.log 2>&1 &
+          x11vnc -display :98 -rfbport 5900 -nopw -forever -shared -quiet > gui/x11vnc.log 2>&1 &
           sleep 3
           export DISPLAY=:99
           DATA=$(mktemp -d)
@@ -150,11 +157,29 @@ jobs:
           xwininfo -root -tree > gui/2-windows.txt
           kill $APP || true
           sleep 3
-          # Second connection: the remembered fingerprint must be accepted without a dialog.
+          # Second connection: the remembered fingerprint must be accepted without a dialog;
+          # the connection is switched to "scale into the tab" (smart sizing) before.
+          python3 - "$DATA/rc-manager.db3" <<'EOF'
+          import json, sqlite3, sys
+          db = sqlite3.connect(sys.argv[1])
+          (opts,) = db.execute("SELECT options FROM connections WHERE name = 'DC01'").fetchone()
+          o = json.loads(opts)
+          o["rdp"]["dynamic_resolution"] = False
+          o["rdp"]["resolution"] = ""
+          db.execute("UPDATE connections SET options = ? WHERE name = 'DC01'", (json.dumps(o),))
+          db.commit()
+          EOF
           squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp2.log 2>&1 &
           APP=$!
           sleep 15
-          import -window root gui/4-rdp-reconnect.png
+          import -window root gui/4-rdp-reconnect-scaled.png
+          kill $APP || true
+          sleep 3
+          squashfs-root/AppRun --data-dir "$DATA" --connect VNC-Test > gui/app-vnc.log 2>&1 &
+          APP=$!
+          sleep 15
+          import -window root gui/5-vnc-tab.png
+          xwininfo -root -tree > gui/5-windows.txt
           kill $APP || true
           sleep 3
           squashfs-root/AppRun --data-dir "$DATA" --connect Linux-Box > gui/app-ssh.log 2>&1 &

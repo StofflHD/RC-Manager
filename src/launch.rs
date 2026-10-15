@@ -289,15 +289,15 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
         // Drawn into the tab. Either the remote resolution follows the tab size, or a fixed
         // resolution is scaled to it (smart sizing) – the two modes of the original.
         a.push(format!("/parent-window:{}", e.host));
-        match parse_resolution(&o.resolution).filter(|_| !o.dynamic_resolution) {
-            Some((w, h)) => {
-                a.push(format!("/size:{w}x{h}"));
-                a.push("/smart-sizing".into());
-            }
-            None => {
-                a.push(format!("/size:{}x{}", e.width.max(64), e.height.max(64)));
-                a.push("/dynamic-resolution".into());
-            }
+        let tab = (e.width.max(64), e.height.max(64));
+        if o.dynamic_resolution {
+            a.push(format!("/size:{}x{}", tab.0, tab.1));
+            a.push("/dynamic-resolution".into());
+        } else {
+            // Servers that cannot change their resolution: scale the desktop into the tab.
+            let (w, h) = parse_resolution(&o.resolution).unwrap_or(tab);
+            a.push(format!("/size:{w}x{h}"));
+            a.push("/smart-sizing".into());
         }
     } else {
         match o.window_mode {
@@ -894,6 +894,10 @@ mod tests {
         c.options.rdp.resolution = "1280x1024".into();
         let p = plan(&c, None, &tools(2), Some(&e), None).unwrap();
         assert!(p.args.contains(&"/size:1280x1024".to_string()) && p.args.contains(&"/smart-sizing".to_string()));
+        // No resolution given: the tab size is scaled.
+        c.options.rdp.resolution.clear();
+        let p = plan(&c, None, &tools(2), Some(&e), None).unwrap();
+        assert!(p.args.contains(&"/size:1000x700".to_string()) && p.args.contains(&"/smart-sizing".to_string()));
 
         let mut c = Connection::new("Box", Protocol::Ssh, None);
         c.host = "box".into();

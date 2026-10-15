@@ -1321,7 +1321,8 @@ impl App {
                         });
                         ui.end_row();
                     });
-                    ui.checkbox(&mut o.dynamic_resolution, "Adapt resolution to window size");
+                    ui.checkbox(&mut o.dynamic_resolution, "Adapt the remote resolution to the window size")
+                        .on_hover_text("Needs server support (Windows 8.1 / Server 2012 R2 or newer). When off, the desktop is scaled to the window.");
                 });
                 ui.collapsing("Local Resources", |ui| {
                     ui.checkbox(&mut o.clipboard, "Clipboard");
