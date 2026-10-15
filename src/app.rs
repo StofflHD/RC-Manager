@@ -73,6 +73,10 @@ struct LogLine {
 }
 
 struct Session {
+    /// The connection and credentials (without password) it was started with, to ask again
+    /// when the client needs other credentials.
+    conn: Connection,
+    cred: Option<Credential>,
     name: String,
     started: Instant,
     display: String,
@@ -127,6 +131,8 @@ struct AskCredentials {
     connection: Uuid,
     cred: Credential,
     save: bool,
+    /// Why the dialog is shown again (e.g. the server requires a user name and password).
+    note: Option<String>,
 }
 
 struct ImportDialog {
@@ -625,7 +631,7 @@ impl App {
         let needs_password = matches!(conn.protocol, Protocol::Rdp | Protocol::Vnc);
         if needs_password && cred.as_ref().map(|c| c.password.is_empty()).unwrap_or(true) {
             let base = cred.unwrap_or_else(|| Credential::new(&conn.name));
-            self.ask_credentials = Some(AskCredentials { connection: id, cred: Credential { password: String::new(), ..base }, save: false });
+            self.ask_credentials = Some(AskCredentials { connection: id, cred: Credential { password: String::new(), ..base }, save: false, note: None });
             return;
         }
         self.launch(&conn, cred.as_ref());
@@ -689,7 +695,16 @@ impl App {
                 self.push(Level::Info, format!("[{session}] {} started: {}", conn.name, plan.display));
                 self.sessions.insert(
                     session,
-                    Session { name: conn.name.clone(), started: Instant::now(), display: plan.display.clone(), pid, stdin: spawned.stdin, recent: VecDeque::new() },
+                    Session {
+                        conn: conn.clone(),
+                        cred: cred.map(|c| Credential { password: String::new(), ..c.clone() }),
+                        name: conn.name.clone(),
+                        started: Instant::now(),
+                        display: plan.display.clone(),
+                        pid,
+                        stdin: spawned.stdin,
+                        recent: VecDeque::new(),
+                    },
                 );
                 if let Some(t) = embed {
                     self.tabs.push(SessionTab {
@@ -741,7 +756,7 @@ impl App {
             c.host = host;
         }
         if matches!(c.protocol, Protocol::Rdp | Protocol::Vnc) {
-            self.ask_credentials = Some(AskCredentials { connection: Uuid::nil(), cred: Credential::new(&c.host), save: false });
+            self.ask_credentials = Some(AskCredentials { connection: Uuid::nil(), cred: Credential::new(&c.host), save: false, note: None });
             self.quick_pending = Some(c);
         } else {
             self.launch(&c, None);
@@ -751,6 +766,25 @@ impl App {
     fn poll_events(&mut self) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
+                Event::Prompt { session, text } if launch::is_credential_prompt(&text) => {
+                    // FreeRDP would wait on its console forever: end this attempt and ask in
+                    // RC Manager's logon dialog instead.
+                    if let Some(s) = self.sessions.get(&session) {
+                        let (conn, cred) = (s.conn.clone(), s.cred.clone());
+                        self.push(Level::Warn, format!("{}: the server requires a user name and password ({}).", conn.name, text.trim()));
+                        self.stop_session(session);
+                        let stored = self.connection(conn.id).is_some();
+                        if !stored {
+                            self.quick_pending = Some(conn.clone());
+                        }
+                        self.ask_credentials = Some(AskCredentials {
+                            connection: if stored { conn.id } else { Uuid::nil() },
+                            cred: cred.unwrap_or_else(|| Credential::new(&conn.name)),
+                            save: false,
+                            note: Some("The server requires a user name and password for this connection.".into()),
+                        });
+                    }
+                }
                 Event::Prompt { session, text } => {
                     if let Some(s) = self.sessions.get(&session) {
                         // The details block starts with "Certificate details for host:port" (or
@@ -1544,6 +1578,9 @@ impl App {
             let mut keep = true;
             let mut go = false;
             Self::modal("Log On").show(ctx, |ui| {
+                if let Some(note) = &ask.note {
+                    ui.colored_label(ui.visuals().warn_fg_color, note);
+                }
                 egui::Grid::new("ask_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                     ui.label("User");
                     ui.text_edit_singleline(&mut ask.cred.username);
