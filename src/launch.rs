@@ -636,10 +636,14 @@ fn is_prompt(text: &str) -> bool {
     text.contains("(Y/T/N)") || text.contains("(Y/N)")
 }
 
-/// Harmless messages that would bury the important ones: FreeRDP lists every key of the
-/// local keymap without an RDP scancode (often 100+ lines per connection).
+/// Messages that would bury or contradict the important ones: FreeRDP lists every key of the
+/// local keymap without an RDP scancode (often 100+ lines per connection), and FreeRDP 3.32
+/// prints "REMOTE HOST IDENTIFICATION HAS CHANGED" for every certificate it does not know
+/// (its store is empty: RC Manager's certificate dialog and fingerprint store decide).
 fn is_noise(line: &str) -> bool {
     line.contains("no RDP scancode found")
+        || line.contains("[tls_print_new_certificate_warn]")
+        || line.contains("BIO_new failed for certificate")
 }
 
 /// Splits a stream into lines and also reports an unfinished line that is a prompt.
@@ -762,6 +766,15 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn freerdp_noise_is_hidden() {
+        let pre = "[15:41:00:521] [374103:0005b55c] [ERROR][com.freerdp.crypto] - ";
+        assert!(is_noise(&format!("{pre}[tls_print_new_certificate_warn]: Host key verification failed.")));
+        assert!(is_noise("[WARN][com.freerdp.client.x11] - [load_map_from_xkbfile]: MENU: keycode: 0x75 -> no RDP scancode found"));
+        assert!(!is_noise(&format!("{pre}[tls_print_certificate_name_mismatch_error]: A valid certificate for the wrong name should NOT be trusted!")));
+        assert!(!is_noise("Certificate details for 172.18.49.50:3389 (RDP-Server):"));
+    }
 
     fn tools(v: u32) -> Tools {
         Tools {
