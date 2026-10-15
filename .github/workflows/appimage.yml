@@ -38,7 +38,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.FREERDP_PREFIX }}
-          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-v2
+          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-v3
 
       - name: Build FreeRDP ${{ env.FREERDP_VERSION }}
         if: steps.freerdp-cache.outputs.cache-hit != 'true'
@@ -59,7 +59,7 @@ jobs:
             -DWITH_FUSE=OFF -DWITH_WEBVIEW=OFF -DWITH_KRB5=OFF -DWITH_PKCS11=OFF -DWITH_CAIRO=OFF \
             -DWITH_URIPARSER=OFF -DUSE_UNWIND=OFF -DWITH_UNICODE_BUILTIN=ON \
             -DWITH_PULSE=ON -DWITH_ALSA=ON -DWITH_CUPS=ON -DWITH_PCSC=ON \
-            -DCHANNEL_URBDRC=OFF -DWITH_MANPAGES=OFF -DBUILD_TESTING=OFF
+            -DCHANNEL_URBDRC=OFF -DWITH_MANPAGES=OFF -DBUILD_TESTING=OFF -DWITH_VERBOSE_WINPR_ASSERT=OFF
           cmake --build freerdp-build
           sudo cmake --install freerdp-build
           sudo install -Dm644 "FreeRDP-${FREERDP_VERSION}/LICENSE" "$FREERDP_PREFIX/share/doc/freerdp-LICENSE"
@@ -126,6 +126,15 @@ jobs:
           mkdir -p gui
           DATA=$(mktemp -d)
           squashfs-root/AppRun --data-dir "$DATA" --import gui-test.db3
+          # xrdp's self-signed certificate: RC Manager must ask (dialog, screenshot 0) ...
+          squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-cert.log 2>&1 &
+          APP=$!
+          sleep 10
+          import -window root gui/0-certificate-dialog.png
+          kill $APP || true
+          sleep 2
+          # ... then trust it once via FreeRDP itself ("T" = remember) and connect again.
+          printf 'T\n' | timeout 20 squashfs-root/usr/bin/xfreerdp /v:127.0.0.1 /cert:tofu +auth-only /u:test /p:test > gui/trust.log 2>&1 || true
           squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp.log 2>&1 &
           APP=$!
           sleep 15

@@ -5,9 +5,9 @@
 
 use crate::model::*;
 use anyhow::{anyhow, bail, Context, Result};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -155,8 +155,11 @@ impl Tools {
 pub struct Plan {
     pub program: String,
     pub args: Vec<String>,
-    /// Passed on stdin (FreeRDP 3: all arguments including the password).
-    pub stdin: Option<String>,
+    /// Environment variables for the client (FreeRDP 3: all arguments including the password,
+    /// readable only by the user, unlike the command line).
+    pub env: Vec<(String, String)>,
+    /// Keep stdin open so that questions of the client (certificate checks) can be answered.
+    pub interactive: bool,
     /// Files holding secrets: (path, content) – created with mode 0600 and deleted shortly after.
     pub secret_files: Vec<(PathBuf, Vec<u8>)>,
     pub working_dir: Option<String>,
@@ -234,6 +237,8 @@ pub fn validate_url(url: &str) -> Result<()> {
     }
     Ok(())
 }
+
+const FREERDP_ARGS_ENV: &str = "RC_MANAGER_FREERDP_ARGS";
 
 pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
     match conn.protocol {
@@ -382,14 +387,16 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     a.extend(split_extra(&o.extra_args)?);
 
     let display = format!("{program} {}", redact(&a, &secrets));
-    let mut plan = Plan { program, display, ..Default::default() };
+    // stdin stays open: FreeRDP asks there whether to trust an unknown certificate.
+    let mut plan = Plan { program, display, interactive: true, ..Default::default() };
     if v3 {
-        // All arguments via stdin so the password does not show up in the process list.
+        // All arguments via an environment variable so the password does not show up in the
+        // process list (/proc/<pid>/environ is readable only by the user).
         if a.iter().any(|x| x.contains('\n')) {
             bail!("Arguments must not contain line breaks");
         }
-        plan.args = vec!["/args-from:stdin".into()];
-        plan.stdin = Some(a.join("\n") + "\n");
+        plan.args = vec![format!("/args-from:env:{FREERDP_ARGS_ENV}")];
+        plan.env.push((FREERDP_ARGS_ENV.into(), a.join("\n")));
     } else {
         if !secrets.is_empty() {
             plan.warnings.push("FreeRDP 2 can only take the password on the command line – other local users can see it in the process list. FreeRDP 3 is recommended.".into());
@@ -453,6 +460,11 @@ fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, em
             }
         }
         cmd.push("ssh".into());
+        if plan.secret_files.iter().any(|(p, _)| p.to_string_lossy().contains("sshpass")) {
+            // sshpass cannot answer "accept this host key?": store new keys (trust on first
+            // use), but still refuse changed ones.
+            cmd.extend(["-o".into(), "StrictHostKeyChecking=accept-new".into()]);
+        }
         if port != 22 {
             cmd.extend(["-p".into(), port.to_string()]);
         }
@@ -585,7 +597,52 @@ fn plan_external(conn: &Connection, cred: Option<&Credential>) -> Result<Plan> {
 /// Messages from running sessions to the UI.
 pub enum Event {
     Output { session: u64, line: String },
+    /// The client waits for an answer on stdin (e.g. FreeRDP's certificate question).
+    Prompt { session: u64, text: String },
     Exited { session: u64, code: Option<i32> },
+}
+
+/// A started client.
+pub struct Spawned {
+    pub pid: u32,
+    /// Open stdin for answering prompts (`Plan::interactive`).
+    pub stdin: Option<ChildStdin>,
+}
+
+/// Questions that end without a line break and wait for input.
+fn is_prompt(text: &str) -> bool {
+    text.contains("(Y/T/N)") || text.contains("(Y/N)")
+}
+
+/// Splits a stream into lines and also reports an unfinished line that is a prompt.
+fn forward_output(mut stream: impl Read, session: u64, tx: &Sender<Event>, wake: &dyn Fn()) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while let Ok(n) = stream.read(&mut chunk) {
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']).to_string();
+            if tx.send(Event::Output { session, line }).is_err() {
+                return;
+            }
+        }
+        let rest = String::from_utf8_lossy(&buf).to_string();
+        if is_prompt(&rest) {
+            buf.clear();
+            if tx.send(Event::Prompt { session, text: rest.trim().to_string() }).is_err() {
+                return;
+            }
+        }
+        wake();
+    }
+    if !buf.is_empty() {
+        tx.send(Event::Output { session, line: String::from_utf8_lossy(&buf).trim_end().to_string() }).ok();
+        wake();
+    }
 }
 
 /// Secret files that still exist; removed after a delay or at the latest when the app exits.
@@ -606,8 +663,8 @@ pub fn cleanup_secret_files() {
 }
 
 /// Starts the planned process, forwards its output and cleans up secret files.
-/// Starts the planned process and returns its process id.
-pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() + Send + Clone + 'static) -> Result<u32> {
+/// Starts the planned process.
+pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() + Send + Clone + 'static) -> Result<Spawned> {
     let cleanup: Vec<PathBuf> = plan.secret_files.iter().map(|(p, _)| p.clone()).collect();
     SECRET_FILES.lock().unwrap_or_else(|e| e.into_inner()).extend(cleanup.iter().cloned());
     for (path, content) in &plan.secret_files {
@@ -626,7 +683,8 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
 
     let mut cmd = Command::new(&plan.program);
     cmd.args(&plan.args)
-        .stdin(if plan.stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .envs(plan.env.iter().map(|(k, v)| (k, v)))
+        .stdin(if plan.interactive { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(dir) = &plan.working_dir {
@@ -640,32 +698,21 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
         }
     };
     let pid = child.id();
-    if let (Some(input), Some(mut stdin)) = (plan.stdin.clone(), child.stdin.take()) {
-        std::thread::spawn(move || {
-            stdin.write_all(input.as_bytes()).ok();
-        });
-    }
+    let stdin = child.stdin.take();
     for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), child.stderr.take().map(|s| Box::new(s) as _)]
         .into_iter()
         .flatten()
     {
         let tx = events.clone();
         let wake = wake.clone();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stream).lines().map_while(|l| l.ok()) {
-                if tx.send(Event::Output { session, line }).is_err() {
-                    break;
-                }
-                wake();
-            }
-        });
+        std::thread::spawn(move || forward_output(stream, session, &tx, &wake));
     }
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
         events.send(Event::Exited { session, code }).ok();
         wake();
     });
-    Ok(pid)
+    Ok(Spawned { pid, stdin })
 }
 
 #[cfg(test)]
@@ -689,22 +736,35 @@ mod tests {
     }
 
     #[test]
-    fn rdp_v3_passes_secrets_via_stdin() {
+    fn rdp_v3_passes_secrets_via_env() {
         let mut c = Connection::new("Srv", Protocol::Rdp, None);
         c.host = "10.0.0.5".into();
         c.port = 3390;
+        c.options.rdp.window_mode = WindowMode::Window;
         c.options.rdp.resolution = "1280x720".into();
         c.options.rdp.dynamic_resolution = false;
         let p = plan(&c, Some(&cred()), &tools(3), None).unwrap();
-        assert_eq!(p.args, vec!["/args-from:stdin"]);
-        let stdin = p.stdin.unwrap();
-        let lines: Vec<&str> = stdin.lines().collect();
+        assert_eq!(p.args, vec!["/args-from:env:RC_MANAGER_FREERDP_ARGS"]);
+        assert!(p.interactive, "stdin stays open for certificate questions");
+        let (name, value) = &p.env[0];
+        assert_eq!(name, "RC_MANAGER_FREERDP_ARGS");
+        let lines: Vec<&str> = value.lines().collect();
         assert!(lines.contains(&"/v:10.0.0.5"));
         assert!(lines.contains(&"/port:3390"));
         assert!(lines.contains(&"/p:pa ss"));
         assert!(lines.contains(&"/size:1280x720"));
         assert!(lines.contains(&"/cert:tofu"));
         assert!(!p.display.contains("pa ss"));
+    }
+
+    #[test]
+    fn prompts_are_detected() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = "Certificate details for 127.0.0.1:3389:\n\tCommon Name: srv\nDo you trust the above certificate? (Y/T/N) ";
+        forward_output(out.as_bytes(), 7, &tx, &|| {});
+        let events: Vec<Event> = rx.try_iter().collect();
+        assert!(matches!(&events[0], Event::Output { line, .. } if line == "Certificate details for 127.0.0.1:3389:"));
+        assert!(matches!(&events[2], Event::Prompt { session: 7, text } if text.ends_with("(Y/T/N)")));
     }
 
     #[test]
@@ -715,7 +775,7 @@ mod tests {
         c.options.rdp.window_mode = WindowMode::MultiMonitor;
         c.options.rdp.gateway = "gw.example".into();
         let p = plan(&c, Some(&cred()), &tools(2), None).unwrap();
-        assert!(p.stdin.is_none());
+        assert!(p.env.is_empty());
         assert!(p.args.contains(&"/cert-ignore".to_string()));
         assert!(p.args.contains(&"/multimon".to_string()));
         assert!(p.args.contains(&"/g:gw.example".to_string()));
@@ -732,7 +792,7 @@ mod tests {
         assert_eq!(p.program, "/usr/bin/xterm");
         let pos = p.args.iter().position(|a| a == "/usr/bin/sshpass").unwrap();
         assert_eq!(p.args[pos + 1], "-f");
-        assert_eq!(&p.args[pos + 3..], ["ssh", "-p", "2222", "-l", "admin", "--", "box"]);
+        assert_eq!(&p.args[pos + 3..], ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", "2222", "-l", "admin", "--", "box"]);
         assert_eq!(p.secret_files.len(), 1);
         assert!(!p.args.iter().any(|a| a.contains("pa ss")));
     }
@@ -797,7 +857,7 @@ mod tests {
         assert!(p.args.contains(&"/kbd:0x00000407".to_string()));
         assert!(p.args.contains(&"/size:1280x720".to_string()));
         let p = plan(&c, None, &tools(3), None).unwrap();
-        assert!(p.stdin.unwrap().lines().any(|l| l == "/kbd:layout:0x00000407"));
+        assert!(p.env[0].1.lines().any(|l| l == "/kbd:layout:0x00000407"));
     }
 
     #[test]

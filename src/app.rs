@@ -77,6 +77,17 @@ struct Session {
     started: Instant,
     display: String,
     pid: u32,
+    stdin: Option<std::process::ChildStdin>,
+    /// Last lines of output, shown with prompts (certificate details).
+    recent: VecDeque<String>,
+}
+
+/// A question of a client waiting on stdin, e.g. FreeRDP's certificate check.
+struct PromptDialog {
+    session: u64,
+    name: String,
+    question: String,
+    details: Vec<String>,
 }
 
 /// A session shown as a tab; its client draws into the X11 window `host`.
@@ -167,6 +178,7 @@ pub struct App {
     session_focus: Option<u64>,
     /// Connections to open at start (`--connect`).
     pending_connect: Vec<String>,
+    prompts: VecDeque<PromptDialog>,
 
     log: VecDeque<LogLine>,
     sessions: BTreeMap<u64, Session>,
@@ -189,6 +201,14 @@ pub struct App {
 }
 
 /// "YYYY-MM-DD HH:MM UTC" without pulling in a date library.
+/// "[12:35:21:300] [4377:0000111f] [ERROR][com.freerdp.crypto] - [fn]: text" → "text"
+fn strip_log_prefix(line: &str) -> String {
+    match line.find("]: ") {
+        Some(i) if line.starts_with('[') => line[i + 3..].to_string(),
+        _ => line.to_string(),
+    }
+}
+
 fn now_string() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
@@ -236,6 +256,7 @@ impl App {
             session_rect: None,
             session_focus: None,
             pending_connect: connect,
+            prompts: VecDeque::new(),
             log: VecDeque::new(),
             sessions: BTreeMap::new(),
             next_session: 1,
@@ -626,9 +647,13 @@ impl App {
         self.next_session += 1;
         let ctx = self.ctx.clone();
         match launch::spawn(&plan, session, self.events_tx.clone(), move || ctx.request_repaint()) {
-            Ok(pid) => {
+            Ok(spawned) => {
+                let pid = spawned.pid;
                 self.push(Level::Info, format!("[{session}] {} started: {}", conn.name, plan.display));
-                self.sessions.insert(session, Session { name: conn.name.clone(), started: Instant::now(), display: plan.display.clone(), pid });
+                self.sessions.insert(
+                    session,
+                    Session { name: conn.name.clone(), started: Instant::now(), display: plan.display.clone(), pid, stdin: spawned.stdin, recent: VecDeque::new() },
+                );
                 if let Some(t) = embed {
                     self.tabs.push(SessionTab {
                         session,
@@ -689,7 +714,25 @@ impl App {
     fn poll_events(&mut self) {
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
+                Event::Prompt { session, text } => {
+                    if let Some(s) = self.sessions.get(&session) {
+                        // Certificate details: the lines after "Certificate details" or the banner.
+                        let start = s
+                            .recent
+                            .iter()
+                            .rposition(|l| l.contains("Certificate details") || l.contains("@@@@") || l.contains("has changed"))
+                            .unwrap_or(s.recent.len().saturating_sub(12));
+                        let details = s.recent.iter().skip(start).map(|l| strip_log_prefix(l)).filter(|l| !l.trim().is_empty() && !l.contains("@@@@")).collect();
+                        self.prompts.push_back(PromptDialog { session, name: s.name.clone(), question: text, details });
+                    }
+                }
                 Event::Output { session, line } => {
+                    if let Some(s) = self.sessions.get_mut(&session) {
+                        s.recent.push_back(line.clone());
+                        while s.recent.len() > 40 {
+                            s.recent.pop_front();
+                        }
+                    }
                     let name = self.sessions.get(&session).map(|s| s.name.clone()).unwrap_or_default();
                     let lvl = if line.contains("ERROR") { Level::Error } else if line.contains("WARN") { Level::Warn } else { Level::Info };
                     self.push(lvl, format!("[{session}] {name}: {line}"));
@@ -702,6 +745,7 @@ impl App {
                         self.push(lvl, format!("[{session}] {} ended (exit code {code}, {}m {}s).", s.name, dur / 60, dur % 60));
                     }
                     self.remove_tab(session);
+                    self.prompts.retain(|p| p.session != session);
                 }
             }
         }
@@ -1488,6 +1532,7 @@ impl App {
             }
         }
 
+        self.ui_prompt(ctx);
         self.ui_credentials(ctx);
         self.ui_import(ctx);
         self.ui_rdp_import(ctx);
@@ -1534,6 +1579,59 @@ impl App {
                     });
                 });
             self.show_about = open;
+        }
+    }
+
+    /// Shows a client's question (certificate check) and writes the answer to its stdin.
+    fn ui_prompt(&mut self, ctx: &egui::Context) {
+        let Some(p) = self.prompts.front() else { return };
+        let certificate = p.question.contains("certificate");
+        let mut answer = None;
+        Self::modal(if certificate { "Certificate Check" } else { "Question" }).show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            ui.label(RichText::new(format!("{}:", p.name)).strong());
+            if certificate {
+                ui.label("The identity of the server could not be verified. Check the details below; trust the certificate only if it really belongs to this server.");
+            }
+            theme::list_frame(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    for line in &p.details {
+                        ui.label(RichText::new(line).monospace().small());
+                    }
+                });
+            });
+            ui.label(RichText::new(&p.question).weak());
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if certificate {
+                    if ui.button("Trust once").clicked() {
+                        answer = Some("Y");
+                    }
+                    if ui.button("Trust always").on_hover_text("Remember this certificate for this server").clicked() {
+                        answer = Some("T");
+                    }
+                    if ui.button("Cancel connection").clicked() {
+                        answer = Some("N");
+                    }
+                } else {
+                    if ui.button("Yes").clicked() {
+                        answer = Some("Y");
+                    }
+                    if ui.button("No").clicked() {
+                        answer = Some("N");
+                    }
+                }
+            });
+        });
+        if let Some(a) = answer {
+            let p = self.prompts.pop_front().unwrap();
+            let ok = self.sessions.get_mut(&p.session).and_then(|s| s.stdin.as_mut()).map(|stdin| {
+                use std::io::Write;
+                stdin.write_all(format!("{a}\n").as_bytes()).and_then(|_| stdin.flush()).is_ok()
+            });
+            if ok != Some(true) {
+                self.push(Level::Warn, format!("{}: the answer could not be sent", p.name));
+            }
         }
     }
 
