@@ -1,6 +1,6 @@
 //! Import from `SqLiteDatabase.db3` of the Windows RDP-Manager (database version 12).
 
-use super::{crypto, nrbf};
+use super::{backup, crypto, nrbf};
 use crate::model::*;
 use crate::store::Data;
 use anyhow::{bail, Context, Result};
@@ -21,6 +21,8 @@ pub struct ImportResult {
     pub data: Data,
     pub warnings: Vec<String>,
     pub skipped_deleted: usize,
+    /// Set when a backup ZIP was imported.
+    pub backup: Option<backup::BackupInfo>,
 }
 
 type Row = HashMap<String, String>;
@@ -95,28 +97,44 @@ fn get<'a>(r: &'a Row, k: &str) -> &'a str {
 }
 
 /// Reads the database. `app_password` is only needed if the original had an application password set.
-pub fn import(db_path: &Path, app_password: Option<&str>) -> Result<ImportResult> {
-    // Open a copy so the original file (WAL) is not modified.
+/// Imports `SqLiteDatabase.db3` or a backup ZIP of the original (detected by content).
+/// `app_password` is only needed if the original had an application password set.
+pub fn import(path: &Path, app_password: Option<&str>) -> Result<ImportResult> {
+    // Work on a private copy so the original file (WAL) is never modified.
     let tmp = std::env::temp_dir().join(format!("rcm-import-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&tmp)?;
-    // The copy holds passwords that are only protected by the original's built-in key.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))?;
-    }
-    let copy = tmp.join("import.db3");
-    std::fs::copy(db_path, &copy).with_context(|| format!("Cannot read {}", db_path.display()))?;
-    let wal = db_path.with_file_name(format!("{}-wal", db_path.file_name().unwrap_or_default().to_string_lossy()));
-    if wal.exists() {
-        std::fs::copy(&wal, tmp.join("import.db3-wal")).ok();
-    }
-    let result = import_inner(&copy, db_path, app_password);
+    let result = (|| {
+        // The copy holds passwords that are only protected by the original's built-in key.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let copy = tmp.join("import.db3");
+        if backup::is_zip(path) {
+            let ex = backup::extract(path)?;
+            crate::vault::create_private(&copy, &ex.database)?;
+            if let Some(wal) = &ex.database_wal {
+                crate::vault::create_private(&tmp.join("import.db3-wal"), wal)?;
+            }
+            let mut r = import_inner(&copy, ex.disable_show_pw.as_deref(), app_password)?;
+            r.backup = Some(ex.info);
+            Ok(r)
+        } else {
+            std::fs::copy(path, &copy).with_context(|| format!("Cannot read {}", path.display()))?;
+            let wal = path.with_file_name(format!("{}-wal", path.file_name().unwrap_or_default().to_string_lossy()));
+            if wal.exists() {
+                std::fs::copy(&wal, tmp.join("import.db3-wal")).ok();
+            }
+            let disable_show_pw = std::fs::read_to_string(path.with_file_name("DisableShowPw")).ok();
+            import_inner(&copy, disable_show_pw.as_deref(), app_password)
+        }
+    })();
     std::fs::remove_dir_all(&tmp).ok();
     result
 }
 
-fn import_inner(copy: &Path, original: &Path, app_password: Option<&str>) -> Result<ImportResult> {
+fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option<&str>) -> Result<ImportResult> {
     let db = rusqlite::Connection::open(copy)?;
     let mut warnings = Vec::new();
 
@@ -134,8 +152,7 @@ fn import_inner(copy: &Path, original: &Path, app_password: Option<&str>) -> Res
             None => bail!("This database is protected by an application password – please enter it"),
         }
     }
-    let disable_show_pw = std::fs::read_to_string(original.with_file_name("DisableShowPw")).ok();
-    let key_password = crypto::effective_password(app_password.filter(|_| !stored_hash.is_empty()), disable_show_pw.as_deref());
+    let key_password = crypto::effective_password(app_password.filter(|_| !stored_hash.is_empty()), disable_show_pw);
     let dpapi = app_settings.get("EncryptionType").map(|s| s.eq_ignore_ascii_case("WindowsUserEncryption")).unwrap_or(false);
     if dpapi {
         warnings.push("Passwords were stored with Windows user encryption (DPAPI) and cannot be decrypted on Linux. Switch the original to AES before exporting.".into());
@@ -347,7 +364,7 @@ fn import_inner(copy: &Path, original: &Path, app_password: Option<&str>) -> Res
         warnings.push(format!("{unknown_types} connection(s) of unknown type (plugins) skipped."));
     }
 
-    Ok(ImportResult { data: Data { folders: out_folders, connections, credentials }, warnings, skipped_deleted })
+    Ok(ImportResult { data: Data { folders: out_folders, connections, credentials }, warnings, skipped_deleted, backup: None })
 }
 
 fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16) {
@@ -471,6 +488,24 @@ mod tests {
         assert_eq!(web.host, "https://intranet.firma.local");
         assert_eq!(web.parent, None);
         assert_eq!(web.credential, CredentialRef::None);
+    }
+
+    #[test]
+    fn imports_backup_zip() {
+        use std::io::Write;
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let zip_path = std::env::temp_dir().join(format!("rcm-import-zip-{}.zip", Uuid::new_v4()));
+        let mut w = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        for (name, file) in [("BackupInfo.xml", "backup/BackupInfo.xml"), ("SqLiteDatabase.db3", "legacy.db3"), ("fileConfig.xml", "backup/fileConfig.xml")] {
+            w.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(&std::fs::read(fx.join(file)).unwrap()).unwrap();
+        }
+        w.finish().unwrap();
+        let r = import(&zip_path, None).unwrap();
+        std::fs::remove_file(&zip_path).ok();
+        assert_eq!(r.data.connections.len(), 3);
+        assert_eq!(r.data.credentials.iter().find(|c| c.username == "administrator").unwrap().password, "Geheim123!");
+        assert_eq!(r.backup.unwrap().version, "4.9.9.3");
     }
 
     #[test]

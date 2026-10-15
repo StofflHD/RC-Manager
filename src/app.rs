@@ -1,7 +1,7 @@
 //! Main window: connection tree on the left, properties on the right, sessions and log at the bottom.
 
 use crate::launch::{self, Event, Tools};
-use crate::legacy::{import as legacy_import, rdpfile};
+use crate::legacy::{backup, import as legacy_import, rdpfile};
 use crate::model::*;
 use crate::net;
 use crate::store::{Data, Store};
@@ -85,6 +85,8 @@ struct AskCredentials {
 struct ImportDialog {
     path: PathBuf,
     app_password: String,
+    /// Metadata when the file is a backup ZIP (or why it cannot be imported).
+    backup: Option<Result<backup::BackupInfo, String>>,
 }
 
 struct RdpImportDialog {
@@ -639,7 +641,7 @@ impl App {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("Import Windows RDP-Manager Database …").clicked() {
+                    if ui.button("Import Windows RDP-Manager Backup or Database …").clicked() {
                         self.pick(Pick::Database);
                         ui.close_menu();
                     }
@@ -915,7 +917,7 @@ impl App {
                     if self.data.folders.is_empty() && self.data.connections.is_empty() {
                         ui.add_space(20.0);
                         ui.label(
-                            RichText::new("No connections yet.\n\nCreate one via “Edit” or import a database of the Windows RDP-Manager via “File”.")
+                            RichText::new("No connections yet.\n\nCreate one via “Edit” or import a backup or database of the Windows RDP-Manager via “File”.")
                                 .weak(),
                         );
                     }
@@ -1521,7 +1523,9 @@ impl App {
             }
             let picked = match kind {
                 Pick::Database => dialog
-                    .set_title("Select the RDP-Manager database (SqLiteDatabase.db3)")
+                    .set_title("Select an RDP-Manager backup (.zip) or database (SqLiteDatabase.db3)")
+                    .add_filter("RDP-Manager backup or database", &["zip", "db3"])
+                    .add_filter("RDP-Manager backup", &["zip"])
                     .add_filter("RDP-Manager database", &["db3"])
                     .add_filter("All files", &["*"])
                     .pick_file()
@@ -1560,7 +1564,8 @@ impl App {
         match picked {
             Some(Picked::Database(path)) => {
                 let app_password = self.import_dialog.take().map(|d| d.app_password).unwrap_or_default();
-                self.import_dialog = Some(ImportDialog { path, app_password });
+                let backup = backup::is_zip(&path).then(|| backup::inspect(&path).map_err(|e| format!("{e:#}")));
+                self.import_dialog = Some(ImportDialog { path, app_password, backup });
             }
             Some(Picked::Rdp(files)) => {
                 if files.is_empty() {
@@ -1578,8 +1583,10 @@ impl App {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
         ui.vertical(|ui| {
-            ui.strong(name);
-            ui.label(RichText::new(dir).weak().small());
+            // Leave room for a button on the right; long folders are shortened with "…".
+            ui.set_max_width((ui.available_width() - 100.0).max(120.0));
+            ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+            ui.add(egui::Label::new(RichText::new(dir).weak().small()).truncate());
         });
     }
 
@@ -1602,7 +1609,24 @@ impl App {
                     });
                 });
             });
-            ui.label(RichText::new("A “DisableShowPw” file next to it is picked up automatically.").weak());
+            match &d.backup {
+                Some(Ok(info)) => {
+                    let mut text = format!("Backup of RDP-Manager {}", if info.version.is_empty() { "?" } else { &info.version });
+                    if !info.date.is_empty() {
+                        text += &format!(" from {}", info.date);
+                    }
+                    ui.label(text);
+                    if !info.comment.is_empty() {
+                        ui.label(RichText::new(format!("“{}”", info.comment)).italics());
+                    }
+                }
+                Some(Err(e)) => {
+                    ui.colored_label(ui.visuals().error_fg_color, e);
+                }
+                None => {
+                    ui.label(RichText::new("A “DisableShowPw” file next to it is picked up automatically.").weak());
+                }
+            }
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label("Application password (if set):");
@@ -1611,7 +1635,8 @@ impl App {
             ui.label(RichText::new("Entries with the same ID are overwritten; importing twice is harmless.").weak());
             ui.add_space(4.0);
             ui.horizontal(|ui| {
-                if ui.add_enabled(!busy, egui::Button::new("Import")).clicked() {
+                let importable = !matches!(d.backup, Some(Err(_)));
+                if ui.add_enabled(!busy && importable, egui::Button::new("Import")).clicked() {
                     run = true;
                 }
                 if ui.button("Cancel").clicked() {
@@ -1639,6 +1664,15 @@ impl App {
                         self.push(Level::Info, msg);
                         for w in r.warnings {
                             self.push(Level::Warn, w);
+                        }
+                        // Take over the layout of the original: an auto-hidden connection tree
+                        // corresponds to the collapsed sidebar with hover overlay.
+                        if let Some(collapsed) = r.backup.as_ref().and_then(|b| b.sidebar_autohide) {
+                            self.s.sidebar_collapsed = collapsed;
+                            self.push(
+                                Level::Info,
+                                if collapsed { "Sidebar collapsed as in the backup (auto-hide)." } else { "Sidebar docked as in the backup." },
+                            );
                         }
                         if let Some(data) = self.result(self.store.load()) {
                             self.data = data;

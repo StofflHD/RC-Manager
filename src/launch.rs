@@ -32,20 +32,54 @@ pub fn find_in_path(name: &str) -> Option<String> {
     })
 }
 
+/// Directory with the clients shipped inside the AppImage (exported by `AppRun`).
+pub fn bundle_dir() -> Option<PathBuf> {
+    std::env::var_os("RC_MANAGER_BUNDLE_DIR").map(PathBuf::from).filter(|d| d.is_dir())
+}
+
+fn in_bundle(name: &str) -> Option<String> {
+    let p = bundle_dir()?.join(name);
+    p.is_file().then(|| p.to_string_lossy().into_owned())
+}
+
+/// The dynamic loader refuses a binary built against newer libraries than the host has.
+fn loader_failed(text: &str) -> bool {
+    text.contains("error while loading shared libraries") || (text.contains("version `GLIBC") && text.contains("not found"))
+}
+
+/// Runs a program once (e.g. with `--version`) and returns its output, or `None` if it
+/// cannot be started on this system.
+fn probe(path: &str, arg: &str) -> Option<String> {
+    let out = Command::new(path).arg(arg).stdin(Stdio::null()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    (!loader_failed(&text)).then_some(text)
+}
+
+fn freerdp_at(path: String, name: &str) -> Option<(String, u32)> {
+    let text = probe(&path, "--version")?;
+    let major = text
+        .split("version")
+        .nth(1)
+        .and_then(|v| v.trim().chars().next())
+        .and_then(|c| c.to_digit(10))
+        .unwrap_or(if name.contains('3') { 3 } else { 2 });
+    Some((path, major))
+}
+
+pub fn is_bundled(path: &str) -> bool {
+    bundle_dir().is_some_and(|d| Path::new(path).starts_with(d))
+}
+
 impl Tools {
     pub fn detect() -> Self {
-        let freerdp = ["xfreerdp3", "sdl-freerdp3", "xfreerdp", "wlfreerdp3", "wlfreerdp", "sdl-freerdp"].iter().find_map(|n| {
-            let path = find_in_path(n)?;
-            let out = Command::new(&path).arg("--version").output().ok()?;
-            let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-            let major = text
-                .split("version")
-                .nth(1)
-                .and_then(|v| v.trim().chars().next())
-                .and_then(|c| c.to_digit(10))
-                .unwrap_or(if n.contains('3') { 3 } else { 2 });
-            Some((path, major))
-        });
+        // Clients shipped in the AppImage come first, if they run on this system.
+        const RDP: [&str; 6] = ["xfreerdp3", "sdl-freerdp3", "xfreerdp", "wlfreerdp3", "wlfreerdp", "sdl-freerdp"];
+        let freerdp = RDP
+            .iter()
+            .find_map(|n| freerdp_at(in_bundle(n)?, n))
+            .or_else(|| RDP.iter().find_map(|n| freerdp_at(find_in_path(n)?, n)));
+        let bundled = |names: &[&str], arg: &str| names.iter().find_map(|n| in_bundle(n).filter(|p| probe(p, arg).is_some()));
+        let vnc_names = ["vncviewer", "xtigervncviewer", "tigervnc"];
 
         let mut candidates: Vec<(String, Vec<&str>)> = Vec::new();
         if let Ok(t) = std::env::var("TERMINAL") {
@@ -76,20 +110,27 @@ impl Tools {
         Self {
             freerdp,
             terminal,
-            sshpass: find_in_path("sshpass"),
-            vncviewer: ["vncviewer", "xtigervncviewer", "tigervnc"].iter().find_map(|n| find_in_path(n)),
+            sshpass: bundled(&["sshpass"], "-V").or_else(|| find_in_path("sshpass")),
+            vncviewer: bundled(&vnc_names, "-help").or_else(|| vnc_names.iter().find_map(|n| find_in_path(n))),
             opener: find_in_path("xdg-open"),
             home: dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
         }
     }
 
     pub fn summary(&self) -> Vec<(&'static str, String)> {
-        let show = |o: &Option<String>| o.clone().unwrap_or_else(|| "not found".into());
+        let label = |p: &str| if is_bundled(p) { format!("bundled with the AppImage ({p})") } else { p.to_string() };
+        let show = |o: &Option<String>| o.as_deref().map(label).unwrap_or_else(|| "not found".into());
         vec![
-            ("RDP (FreeRDP)", self.freerdp.as_ref().map(|(p, v)| format!("{p} (v{v})")).unwrap_or_else(|| "not found – package freerdp3-x11 or freerdp2-x11".into())),
+            (
+                "RDP (FreeRDP)",
+                self.freerdp
+                    .as_ref()
+                    .map(|(p, v)| format!("{} – v{v}", label(p)))
+                    .unwrap_or_else(|| "not found – package freerdp3-x11 or freerdp2-x11".into()),
+            ),
             ("Terminal", self.terminal.as_ref().map(|(p, _)| p.clone()).unwrap_or_else(|| "not found".into())),
             ("sshpass (SSH password)", show(&self.sshpass)),
-            ("VNC (TigerVNC)", self.vncviewer.clone().unwrap_or_else(|| "not found – package tigervnc-viewer".into())),
+            ("VNC (TigerVNC)", self.vncviewer.as_deref().map(label).unwrap_or_else(|| "not found – package tigervnc-viewer".into())),
             ("Browser (xdg-open)", show(&self.opener)),
         ]
     }
@@ -673,6 +714,13 @@ mod tests {
         let mut c = Connection::new("W", Protocol::Web, None);
         c.host = "http://intranet/app?x=1".into();
         assert!(plan(&c, None, &tools(3)).is_ok());
+    }
+
+    #[test]
+    fn loader_errors_are_detected() {
+        assert!(loader_failed("xfreerdp: error while loading shared libraries: libwinpr3.so.3: cannot open shared object file"));
+        assert!(loader_failed("/tmp/x/xfreerdp: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found (required by xfreerdp)"));
+        assert!(!loader_failed("This is FreeRDP version 3.32.2 (n/a)"));
     }
 
     #[test]

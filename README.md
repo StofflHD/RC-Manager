@@ -27,9 +27,27 @@ then keeps the active sessions and a counter of new warnings visible.
 | Import of .rdp files | ✔ | ✔ |
 | **Import of the Windows database** | – | ✔ including passwords and settings |
 | Light / dark theme | – | ✔ |
+| Backups (ZIP) of the Windows RDP-Manager | create/restore | import |
 | Tabs with embedded sessions, Hyper-V dashboard, key sequences, session/task manager, plugins (AD import, SCCM, MSRA, port scanner) | ✔ | ✘ (Windows-specific or not ported) |
 
-## Requirements
+## Installation (AppImage)
+
+Download `RC-Manager-<version>-x86_64.AppImage` from the releases, then:
+
+```bash
+chmod +x RC-Manager-*-x86_64.AppImage
+./RC-Manager-*-x86_64.AppImage
+```
+
+The AppImage contains **FreeRDP 3**, the **TigerVNC** viewer and **sshpass**, so nothing else
+needs to be installed – except a terminal emulator and `ssh` for SSH/Telnet, which every desktop
+has. It needs glibc ≥ 2.35 (Ubuntu 22.04, Debian 12, Fedora 36 or newer) and X11 or Wayland.
+If a bundled client cannot run on a system, RC Manager uses the installed one instead;
+`rc-manager --tools` (or *Options → External Programs*) shows which clients are used.
+
+## Running without the AppImage
+
+Install the clients you need yourself:
 
 ```bash
 # Debian/Ubuntu
@@ -40,19 +58,8 @@ sudo dnf install freerdp tigervnc sshpass
 sudo pacman -S freerdp tigervnc sshpass
 ```
 
-Only the clients you use are needed; *Options → External Programs* shows what was found.
 File dialogs use the XDG desktop portal (present on GNOME, KDE and most desktops); without it,
-`zenity` is used.
-The binary needs glibc ≥ 2.31 and X11 or Wayland.
-
-## Installation (AppImage)
-
-Download `RC-Manager-<version>-x86_64.AppImage` from the releases, then:
-
-```bash
-chmod +x RC-Manager-*-x86_64.AppImage
-./RC-Manager-*-x86_64.AppImage
-```
+`zenity` is used. The plain binary needs glibc ≥ 2.31 and X11 or Wayland.
 
 ## Building
 
@@ -64,12 +71,15 @@ cargo build --release
 AppImage (`dist/RC-Manager-<version>-x86_64.AppImage`):
 
 ```bash
-packaging/build-appimage.sh
+packaging/build-appimage.sh                    # RC Manager only
+BUNDLE_TOOLS=1 packaging/build-appimage.sh     # with FreeRDP, TigerVNC and sshpass
 ```
 
-With `ZIGBUILD=1` the script builds via `cargo zigbuild` for glibc 2.31, so the AppImage also runs
-on distributions older than the build machine. GitHub Actions (`.github/workflows/appimage.yml`)
-runs the tests and this script on every push; a tag `v*` publishes the AppImage as a release.
+`BUNDLE_TOOLS=1` takes FreeRDP from `FREERDP_PREFIX` (default `/opt/freerdp`) and TigerVNC and
+sshpass from the system, and bundles them with their libraries via linuxdeploy. With `ZIGBUILD=1`
+RC Manager itself is built via `cargo zigbuild` for glibc 2.31. GitHub Actions
+(`.github/workflows/appimage.yml`) builds FreeRDP from source on Ubuntu 22.04, runs the tests,
+builds and checks the AppImage on every push; a tag `v*` publishes it as a release.
 
 Desktop integration without AppImage: copy `packaging/rc-manager.desktop` to
 `~/.local/share/applications/` and `packaging/rc-manager.png` to
@@ -77,19 +87,22 @@ Desktop integration without AppImage: copy `packaging/rc-manager.desktop` to
 
 ## Migrating from the Windows RDP-Manager
 
-1. On Windows, copy `SqLiteDatabase.db3` from the RDP-Manager data folder (if
-   "do not show passwords" was enabled, also copy the `DisableShowPw` file next to it).
-2. In the Linux version use *File → Import Windows RDP-Manager Database …* and pick the file in
-   the file dialog – or on the command line:
+1. In the Windows RDP-Manager create a backup (a ZIP file such as `RDP_Manager_2026.04.22.zip`),
+   or copy `SqLiteDatabase.db3` from its data folder (if "do not show passwords" was enabled,
+   also copy the `DisableShowPw` file next to it – a backup contains it automatically).
+2. In RC Manager use *File → Import Windows RDP-Manager Backup or Database …* and pick the file
+   in the file dialog – or on the command line:
 
 ```bash
-rc-manager --import ~/SqLiteDatabase.db3 [--app-password SECRET]
+rc-manager --import ~/RDP_Manager_2026.04.22.zip [--app-password SECRET]
 ```
 
 Imported are folders, connections (RDP, PuTTY → SSH/Telnet, VNC, web, external programs),
 credentials including passwords, as well as port, resolution, colour depth, redirections and
 gateway from the settings – also when they are inherited from folders. Deleted entries (recycle
-bin) are skipped.
+bin) are skipped. From a backup the import dialog shows version, date and comment, and the
+layout of the connection tree (auto-hide or docked) is taken over for the sidebar. Backups of
+installations that used a database server instead of SQLite cannot be imported.
 
 Passwords stored with "Windows user encryption" (DPAPI) cannot be decrypted on Linux. Switch
 the original to AES before exporting.

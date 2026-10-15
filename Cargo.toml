@@ -1,6 +1,6 @@
 [package]
 name = "rc-manager"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "RC Manager – remote connection manager for RDP, SSH, VNC, web and external programs – Linux re-implementation of the Windows RDP-Manager"
 authors = ["© StofflHD and Claude"]
@@ -19,6 +19,8 @@ dirs = "5.0.1"
 shell-words = "1.1.0"
 # Native file dialogs; on Linux via the XDG desktop portal (pure Rust, falls back to zenity).
 rfd = "=0.15.1"
+# Backups of the original are ZIP files (deflate only, pure Rust).
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 # Encryption of stored credentials
 chacha20poly1305 = "0.10.1"

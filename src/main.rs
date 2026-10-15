@@ -17,9 +17,10 @@ fn usage() {
          Usage: rc-manager [OPTIONS]\n\n\
          Options:\n  \
          --data-dir <PATH>          Data directory (default: {})\n  \
-         --import <SqLiteDatabase.db3> [--app-password <PW>]\n                             Import a Windows RDP-Manager database and exit\n  \
+         --import <backup.zip|SqLiteDatabase.db3> [--app-password <PW>]\n                             Import a Windows RDP-Manager backup or database and exit\n  \
          --list                     List all connections\n  \
-         -h, --help                 Show this help\n\n\
+         --tools                    Show the clients found (FreeRDP, terminal, VNC, …)\n  \
+         -h, --help                Show this help\n\n\
          With a master password set, --import/--list read it from RC_MANAGER_MASTER_PASSWORD.",
         env!("CARGO_PKG_VERSION"),
         store::Store::default_dir().display()
@@ -46,6 +47,12 @@ fn main() -> anyhow::Result<()> {
             "--import" => import = Some(PathBuf::from(args.next().ok_or_else(|| anyhow::anyhow!("--import expects a path"))?)),
             "--app-password" => app_password = args.next(),
             "--list" => list = true,
+            "--tools" => {
+                for (name, value) in launch::Tools::detect().summary() {
+                    println!("{name:<24} {value}");
+                }
+                return Ok(());
+            }
             other => anyhow::bail!("Unknown option {other} (see --help)"),
         }
     }
