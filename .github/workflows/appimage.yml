@@ -30,7 +30,7 @@ jobs:
             libssl-dev zlib1g-dev libcjson-dev libusb-1.0-0-dev \
             libx11-dev libxext-dev libxinerama-dev libxcursor-dev libxdamage-dev libxv-dev \
             libxkbfile-dev libxi-dev libxrandr-dev libxrender-dev libxfixes-dev libxtst-dev \
-            libxkbcommon-dev libasound2-dev libpulse-dev libcups2-dev libpcsclite-dev \
+            libxkbcommon-dev libxkbcommon-x11-0 libasound2-dev libpulse-dev libcups2-dev libpcsclite-dev \
             tigervnc-viewer sshpass xterm             xvfb xrdp imagemagick xdotool x11-utils libgl1-mesa-dri libegl1
 
       - name: Cache FreeRDP
@@ -107,6 +107,8 @@ jobs:
       # screenshots before and after resizing RC Manager's window.
       - name: GUI test (Xvfb, xrdp)
         run: |
+          # The AppImage must not depend on the runner's xkbcommon-x11 (bundled instead).
+          sudo dpkg -r --force-depends libxkbcommon-x11-0
           sudo adduser xrdp ssl-cert || true
           sudo systemctl restart xrdp
           sleep 2
@@ -130,6 +132,7 @@ jobs:
           import -window root gui/1-rdp-tab.png
           xwininfo -root -tree > gui/1-windows.txt
           WID=$(xdotool search --name '^RC Manager$' | head -1)
+          test -n "$WID" || { cat gui/app-rdp.log; exit 1; }
           xdotool windowsize "$WID" 1700 1100
           sleep 10
           import -window root gui/2-rdp-resized.png

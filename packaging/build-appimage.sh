@@ -70,8 +70,16 @@ if [ "${BUNDLE_TOOLS:-0}" = "1" ]; then
     fetch "$LINUXDEPLOY" https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
     # linuxdeploy copies each binary to usr/bin, its libraries to usr/lib (except the
     # base system libraries on the AppImage exclude list) and points RPATH at usr/lib.
+    # winit loads xkbcommon with dlopen, so linuxdeploy cannot see it: add it explicitly and
+    # deploy rc-manager too, which gives it an RPATH to usr/lib for these dlopen calls.
+    EXTRA_LIBS=()
+    for lib in libxkbcommon.so.0 libxkbcommon-x11.so.0; do
+        path="$(ldconfig -p | awk -v l="$lib" '$1 == l && /x86-64/ {print $NF; exit}')"
+        [ -n "$path" ] || { echo "missing library: $lib" >&2; exit 1; }
+        EXTRA_LIBS+=(--library "$path")
+    done
     LD_LIBRARY_PATH="$FREERDP_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$LINUXDEPLOY" --appdir "$APPDIR" \
+        "$LINUXDEPLOY" --appdir "$APPDIR" "${EXTRA_LIBS[@]}" --executable "$BIN" \
         --executable "$XFREERDP" --executable "$VNCVIEWER" --executable "$SSHPASS" --executable "$XTERM"
     # linuxdeploy may replace AppRun; ours exports the bundle directory.
     install -m 755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
