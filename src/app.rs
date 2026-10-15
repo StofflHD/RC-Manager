@@ -292,6 +292,7 @@ impl App {
         if !locked {
             app.try_unlock(None);
         }
+        app.tools.freerdp_config = Some(app.store.dir().join("freerdp"));
         if app.tools.freerdp.is_none() {
             app.push(Level::Warn, "FreeRDP not found – RDP connections need it installed (Options → External Programs).");
         }
@@ -737,14 +738,19 @@ impl App {
                 Event::Prompt { session, text } => {
                     if let Some(s) = self.sessions.get(&session) {
                         // Certificate details: the lines after "Certificate details" or the banner.
+                        // The details block starts with "Certificate details for host:port".
                         let start = s
                             .recent
                             .iter()
-                            .rposition(|l| l.contains("Certificate details") || l.contains("@@@@") || l.contains("has changed"))
+                            .rposition(|l| l.contains("Certificate details for"))
                             .unwrap_or(s.recent.len().saturating_sub(12));
                         let details: Vec<String> = s.recent.iter().skip(start).map(|l| strip_log_prefix(l)).filter(|l| !l.trim().is_empty() && !l.contains("@@@@")).collect();
-                        let changed = s.recent.iter().any(|l| l.contains("HAS CHANGED") || l.contains("has changed"));
                         let certificate = certificate_of(&details);
+                        // "Changed" only if RC Manager trusted a different certificate for this
+                        // server before (FreeRDP's own store is not used and not reliable).
+                        let changed = certificate.as_ref().is_some_and(|(hp, fp)| {
+                            self.store.trusted_fingerprint(hp).ok().flatten().is_some_and(|known| &known != fp)
+                        });
                         self.prompts.push_back(PromptDialog { session, name: s.name.clone(), question: text, details, certificate, changed });
                     }
                 }
@@ -849,6 +855,7 @@ impl App {
                     }
                     if ui.button("Re-detect External Programs").clicked() {
                         self.tools = Tools::detect();
+                        self.tools.freerdp_config = Some(self.store.dir().join("freerdp"));
                         self.push(Level::Info, "External programs re-detected.");
                         ui.close_menu();
                     }

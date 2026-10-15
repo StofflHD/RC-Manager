@@ -134,6 +134,7 @@ jobs:
           DISPLAY=:98 xclock -geometry 300x300+60+60 -update 1 &
           DISPLAY=:98 xterm -geometry 70x20+420+60 -bg navy -fg white -e sh -c 'echo "Remote desktop via RDP"; while true; do date; sleep 1; done' &
           DISPLAY=:98 freerdp-shadow-cli /port:3390 -auth > gui/shadow.log 2>&1 &
+          SHADOW=$!
           x11vnc -display :98 -rfbport 5900 -nopw -forever -shared -quiet > gui/x11vnc.log 2>&1 &
           sleep 3
           export DISPLAY=:99
@@ -182,6 +183,18 @@ jobs:
           xwininfo -root -tree > gui/5-windows.txt
           kill $APP || true
           sleep 3
+          # A restarted shadow server has a new certificate: RC Manager must warn that it
+          # differs from the trusted one (screenshot 6).
+          kill $SHADOW || true
+          sleep 2
+          DISPLAY=:98 freerdp-shadow-cli /port:3390 -auth > gui/shadow2.log 2>&1 &
+          sleep 4
+          squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp3.log 2>&1 &
+          APP=$!
+          sleep 10
+          import -window root gui/6-changed-certificate.png
+          kill $APP || true
+          sleep 2
           squashfs-root/AppRun --data-dir "$DATA" --connect Linux-Box > gui/app-ssh.log 2>&1 &
           APP=$!
           sleep 10

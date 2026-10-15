@@ -23,6 +23,10 @@ pub struct Tools {
     /// xterm for SSH/Telnet sessions embedded in a tab (`-into`).
     pub xterm: Option<String>,
     pub home: String,
+    /// Private configuration directory for FreeRDP (`XDG_CONFIG_HOME`): RC Manager keeps
+    /// trusted certificates itself, so FreeRDP's own store (unreliable in 3.32, possibly with
+    /// stale entries) is not consulted.
+    pub freerdp_config: Option<PathBuf>,
 }
 
 /// Where an embedded session is drawn: the X11 host window of its tab (see `embed.rs`).
@@ -127,6 +131,7 @@ impl Tools {
             opener: find_in_path("xdg-open"),
             xterm: bundled(&["xterm"], "-version").or_else(|| find_in_path("xterm")),
             home: dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
+            freerdp_config: None,
         }
     }
 
@@ -160,6 +165,8 @@ pub struct Plan {
     pub env: Vec<(String, String)>,
     /// Keep stdin open so that questions of the client (certificate checks) can be answered.
     pub interactive: bool,
+    /// Directories created with mode 0700 before starting the client.
+    pub private_dirs: Vec<PathBuf>,
     /// Files holding secrets: (path, content) – created with mode 0600 and deleted shortly after.
     pub secret_files: Vec<(PathBuf, Vec<u8>)>,
     pub working_dir: Option<String>,
@@ -394,6 +401,10 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     let display = format!("{program} {}", redact(&a, &secrets));
     // stdin stays open: FreeRDP asks there whether to trust an unknown certificate.
     let mut plan = Plan { program, display, interactive: true, ..Default::default() };
+    if let Some(dir) = &tools.freerdp_config {
+        plan.env.push(("XDG_CONFIG_HOME".into(), dir.to_string_lossy().into_owned()));
+        plan.private_dirs.push(dir.clone());
+    }
     if v3 {
         // All arguments via an environment variable so the password does not show up in the
         // process list (/proc/<pid>/environ is readable only by the user).
@@ -670,6 +681,14 @@ pub fn cleanup_secret_files() {
 /// Starts the planned process, forwards its output and cleans up secret files.
 /// Starts the planned process.
 pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() + Send + Clone + 'static) -> Result<Spawned> {
+    for dir in &plan.private_dirs {
+        std::fs::create_dir_all(dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
     let cleanup: Vec<PathBuf> = plan.secret_files.iter().map(|(p, _)| p.clone()).collect();
     SECRET_FILES.lock().unwrap_or_else(|e| e.into_inner()).extend(cleanup.iter().cloned());
     for (path, content) in &plan.secret_files {
@@ -733,6 +752,7 @@ mod tests {
             opener: Some("/usr/bin/xdg-open".into()),
             xterm: Some("/usr/bin/xterm".into()),
             home: "/home/test".into(),
+            freerdp_config: Some("/home/test/.local/share/rc-manager/freerdp".into()),
         }
     }
 
@@ -751,7 +771,8 @@ mod tests {
         let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
         assert_eq!(p.args, vec!["/args-from:env:RC_MANAGER_FREERDP_ARGS"]);
         assert!(p.interactive, "stdin stays open for certificate questions");
-        let (name, value) = &p.env[0];
+        assert!(p.env.iter().any(|(k, v)| k == "XDG_CONFIG_HOME" && v.ends_with("rc-manager/freerdp")));
+        let (name, value) = p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap();
         assert_eq!(name, "RC_MANAGER_FREERDP_ARGS");
         let lines: Vec<&str> = value.lines().collect();
         assert!(lines.contains(&"/v:10.0.0.5"));
@@ -768,10 +789,10 @@ mod tests {
         c.host = "srv".into();
         let fp = "5630942daa7c67ce9e54ec4812257907d2dd2435c99165249b66baf95f1d5c05";
         let p = plan(&c, None, &tools(3), None, Some(fp)).unwrap();
-        assert!(p.env[0].1.lines().any(|l| l == format!("/cert:fingerprint:sha256:{fp}")));
+        assert!(p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap().1.lines().any(|l| l == format!("/cert:fingerprint:sha256:{fp}")));
         // Malformed fingerprints and FreeRDP 2 (no such option) are ignored.
         let p = plan(&c, None, &tools(3), None, Some("zz")).unwrap();
-        assert!(!p.env[0].1.contains("/cert"));
+        assert!(!p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap().1.contains("/cert"));
         let p = plan(&c, None, &tools(2), None, Some(fp)).unwrap();
         assert!(!p.args.iter().any(|a| a.starts_with("/cert")));
     }
@@ -794,7 +815,7 @@ mod tests {
         c.options.rdp.window_mode = WindowMode::MultiMonitor;
         c.options.rdp.gateway = "gw.example".into();
         let p = plan(&c, Some(&cred()), &tools(2), None, None).unwrap();
-        assert!(p.env.is_empty());
+        assert!(!p.env.iter().any(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS"));
         assert!(p.args.contains(&"/cert-ignore".to_string()));
         assert!(p.args.contains(&"/multimon".to_string()));
         assert!(p.args.contains(&"/g:gw.example".to_string()));
@@ -876,7 +897,7 @@ mod tests {
         assert!(p.args.contains(&"/kbd:0x00000407".to_string()));
         assert!(p.args.contains(&"/size:1280x720".to_string()));
         let p = plan(&c, None, &tools(3), None, None).unwrap();
-        assert!(p.env[0].1.lines().any(|l| l == "/kbd:layout:0x00000407"));
+        assert!(p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap().1.lines().any(|l| l == "/kbd:layout:0x00000407"));
     }
 
     #[test]

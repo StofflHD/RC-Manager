@@ -161,6 +161,11 @@ impl Store {
         self.vault = None;
     }
 
+    /// Data directory (database, key file, FreeRDP's private configuration).
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     fn vault(&self) -> Result<&Vault> {
         self.vault.as_ref().ok_or_else(|| anyhow!("The vault is locked"))
     }
