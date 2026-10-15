@@ -116,6 +116,22 @@ RC Manager itself is built via `cargo zigbuild` for glibc 2.31. GitHub Actions
 (`.github/workflows/appimage.yml`) builds FreeRDP from source on Ubuntu 22.04, runs the tests,
 builds and checks the AppImage on every push; a tag `v*` publishes it as a release.
 
+### Local development (Linux or WSL)
+
+`packaging/wsl-dev.sh` builds and tests in about a minute instead of a full CI run. It reuses the
+bundled clients of the newest AppImage in `dist/` and only rebuilds RC Manager (profile `fast`:
+no LTO, incremental):
+
+```bash
+packaging/wsl-dev.sh test       # unit tests
+packaging/wsl-dev.sh build      # build into ~/.cache/rc-manager-dev/AppDir
+packaging/wsl-dev.sh gui        # GUI test on Xvfb with a local RDP shadow server, screenshots in target/gui-local
+packaging/wsl-dev.sh run        # start it (under WSL on the Windows desktop via WSLg)
+packaging/wsl-dev.sh appimage   # pack dist/RC-Manager-<version>-local-x86_64.AppImage
+```
+
+Local builds need the glibc of the build system; published AppImages come from CI.
+
 Desktop integration without AppImage: copy `packaging/rc-manager.desktop` to
 `~/.local/share/applications/` and `packaging/rc-manager.png` to
 `~/.local/share/icons/hicolor/256x256/apps/`.
