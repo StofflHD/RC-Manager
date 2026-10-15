@@ -31,7 +31,8 @@ jobs:
             libx11-dev libxext-dev libxinerama-dev libxcursor-dev libxdamage-dev libxv-dev \
             libxkbfile-dev libxi-dev libxrandr-dev libxrender-dev libxfixes-dev libxtst-dev \
             libxkbcommon-dev libxkbcommon-x11-0 libasound2-dev libpulse-dev libcups2-dev libpcsclite-dev \
-            tigervnc-viewer sshpass xterm             xvfb xrdp imagemagick xdotool x11-utils libgl1-mesa-dri libegl1
+            tigervnc-viewer sshpass xterm \
+            xvfb freerdp2-shadow-x11 x11-apps x11-xserver-utils imagemagick xdotool x11-utils libgl1-mesa-dri libegl1
 
       - name: Cache FreeRDP
         id: freerdp-cache
@@ -103,38 +104,43 @@ jobs:
           sudo mv "$FREERDP_PREFIX.hidden" "$FREERDP_PREFIX"
           # The extracted copy stays for the GUI test.
 
-      # Sessions embedded as tabs: a virtual X server, a local RDP server (xrdp) and
-      # screenshots before and after resizing RC Manager's window.
-      - name: GUI test (Xvfb, xrdp)
+      # Sessions embedded as tabs: two virtual X servers – :98 is shared via RDP by FreeRDP's
+      # shadow server (a clock and a terminal on it), RC Manager runs on :99 – and screenshots
+      # of the certificate dialog, the RDP tab before/after resizing and an SSH tab.
+      - name: GUI test (Xvfb, RDP shadow server)
         run: |
           # The AppImage must not depend on the runner's xkbcommon-x11 (bundled instead).
           sudo dpkg -r --force-depends libxkbcommon-x11-0
-          sudo adduser xrdp ssl-cert || true
-          sudo systemctl restart xrdp
-          sleep 2
           python3 - <<'EOF'
           import shutil, sqlite3
           shutil.copy('tests/fixtures/legacy.db3', 'gui-test.db3')
           db = sqlite3.connect('gui-test.db3')
-          db.execute("UPDATE Connections SET Target='127.0.0.1' WHERE Name IN ('DC01', 'Linux-Box')")
+          db.execute("UPDATE Connections SET Target='127.0.0.1:3390' WHERE Name = 'DC01'")
+          db.execute("UPDATE Connections SET Target='127.0.0.1' WHERE Name = 'Linux-Box'")
           db.execute("DELETE FROM FolderSetting")
           db.commit()
           EOF
-          Xvfb :99 -screen 0 1920x1200x24 &
-          export DISPLAY=:99
-          sleep 2
           mkdir -p gui
+          Xvfb :98 -screen 0 1280x800x24 &
+          Xvfb :99 -screen 0 1920x1200x24 &
+          sleep 2
+          DISPLAY=:98 xsetroot -solid steelblue
+          DISPLAY=:98 xclock -geometry 300x300+60+60 -update 1 &
+          DISPLAY=:98 xterm -geometry 70x20+420+60 -bg navy -fg white -e sh -c 'echo "Remote desktop via RDP"; while true; do date; sleep 1; done' &
+          DISPLAY=:98 freerdp-shadow-cli /port:3390 -auth > gui/shadow.log 2>&1 &
+          sleep 3
+          export DISPLAY=:99
           DATA=$(mktemp -d)
           squashfs-root/AppRun --data-dir "$DATA" --import gui-test.db3
-          # xrdp's self-signed certificate: RC Manager must ask (dialog, screenshot 0) ...
+          # Unknown self-signed certificate: RC Manager has to ask (screenshot 0).
           squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-cert.log 2>&1 &
           APP=$!
           sleep 10
           import -window root gui/0-certificate-dialog.png
           kill $APP || true
           sleep 2
-          # ... then trust it once via FreeRDP itself ("T" = remember) and connect again.
-          printf 'T\n' | timeout 20 squashfs-root/usr/bin/xfreerdp /v:127.0.0.1 /cert:tofu +auth-only /u:test /p:test > gui/trust.log 2>&1 || true
+          # Trust it via FreeRDP itself ("T" = remember), then connect again.
+          printf 'T\n' | timeout 20 squashfs-root/usr/bin/xfreerdp /v:127.0.0.1 /port:3390 +auth-only /u:test /p:test > gui/trust.log 2>&1 || true
           squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp.log 2>&1 &
           APP=$!
           sleep 15

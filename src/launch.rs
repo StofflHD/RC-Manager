@@ -340,13 +340,12 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     if o.console {
         a.push("/admin".into());
     }
-    a.push(match (o.ignore_certificate, v3) {
-        (true, true) => "/cert:ignore",
-        (true, false) => "/cert-ignore",
-        (false, true) => "/cert:tofu",
-        (false, false) => "/cert-tofu",
+    // Without an option FreeRDP verifies the certificate against the system CAs and asks
+    // (on stdin, shown as a dialog by RC Manager) when that fails – unknown, wrong name or
+    // changed. "tofu" would refuse a changed certificate without asking.
+    if o.ignore_certificate {
+        a.push(if v3 { "/cert:ignore" } else { "/cert-ignore" }.into());
     }
-    .into());
     if !o.gateway.trim().is_empty() {
         // Gateway logon: its own credentials or those of the connection
         let (gu, gd, gp) = match cred {
@@ -753,7 +752,7 @@ mod tests {
         assert!(lines.contains(&"/port:3390"));
         assert!(lines.contains(&"/p:pa ss"));
         assert!(lines.contains(&"/size:1280x720"));
-        assert!(lines.contains(&"/cert:tofu"));
+        assert!(!lines.iter().any(|l| l.starts_with("/cert")), "certificate checks stay on and are asked in a dialog");
         assert!(!p.display.contains("pa ss"));
     }
 
