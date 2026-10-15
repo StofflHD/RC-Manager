@@ -23,7 +23,8 @@ pub struct Tools {
     /// xterm for SSH/Telnet sessions embedded in a tab (`-into`).
     pub xterm: Option<String>,
     pub home: String,
-    /// Private configuration directory for FreeRDP (`XDG_CONFIG_HOME`): RC Manager keeps
+    /// Base directory for FreeRDP's configuration (`XDG_CONFIG_HOME`): every start gets a new,
+    /// empty subdirectory that is deleted when FreeRDP exits. RC Manager keeps
     /// trusted certificates itself, so FreeRDP's own store (unreliable in 3.32, possibly with
     /// stale entries) is not consulted.
     pub freerdp_config: Option<PathBuf>,
@@ -165,7 +166,7 @@ pub struct Plan {
     pub env: Vec<(String, String)>,
     /// Keep stdin open so that questions of the client (certificate checks) can be answered.
     pub interactive: bool,
-    /// Directories created with mode 0700 before starting the client.
+    /// Directories created with mode 0700 before starting the client and removed after it exits.
     pub private_dirs: Vec<PathBuf>,
     /// Files holding secrets: (path, content) – created with mode 0600 and deleted shortly after.
     pub secret_files: Vec<(PathBuf, Vec<u8>)>,
@@ -401,9 +402,14 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     let display = format!("{program} {}", redact(&a, &secrets));
     // stdin stays open: FreeRDP asks there whether to trust an unknown certificate.
     let mut plan = Plan { program, display, interactive: true, ..Default::default() };
-    if let Some(dir) = &tools.freerdp_config {
+    if let Some(base) = &tools.freerdp_config {
+        // A fresh directory per start: FreeRDP's certificate store must never decide (an entry
+        // it cannot read makes it refuse the connection as "changed" without asking).
+        static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = base.join(format!("run-{}-{n}", std::process::id()));
         plan.env.push(("XDG_CONFIG_HOME".into(), dir.to_string_lossy().into_owned()));
-        plan.private_dirs.push(dir.clone());
+        plan.private_dirs.push(dir);
     }
     if v3 {
         // All arguments via an environment variable so the password does not show up in the
@@ -630,6 +636,12 @@ fn is_prompt(text: &str) -> bool {
     text.contains("(Y/T/N)") || text.contains("(Y/N)")
 }
 
+/// Harmless messages that would bury the important ones: FreeRDP lists every key of the
+/// local keymap without an RDP scancode (often 100+ lines per connection).
+fn is_noise(line: &str) -> bool {
+    line.contains("no RDP scancode found")
+}
+
 /// Splits a stream into lines and also reports an unfinished line that is a prompt.
 fn forward_output(mut stream: impl Read, session: u64, tx: &Sender<Event>, wake: &dyn Fn()) {
     let mut buf = Vec::new();
@@ -642,6 +654,9 @@ fn forward_output(mut stream: impl Read, session: u64, tx: &Sender<Event>, wake:
         while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = buf.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']).to_string();
+            if is_noise(&line) {
+                continue;
+            }
             if tx.send(Event::Output { session, line }).is_err() {
                 return;
             }
@@ -682,6 +697,7 @@ pub fn cleanup_secret_files() {
 /// Starts the planned process.
 pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() + Send + Clone + 'static) -> Result<Spawned> {
     for dir in &plan.private_dirs {
+        std::fs::remove_dir_all(dir).ok();
         std::fs::create_dir_all(dir)?;
         #[cfg(unix)]
         {
@@ -731,8 +747,12 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
         let wake = wake.clone();
         std::thread::spawn(move || forward_output(stream, session, &tx, &wake));
     }
+    let private_dirs = plan.private_dirs.clone();
     std::thread::spawn(move || {
         let code = child.wait().ok().and_then(|s| s.code());
+        for dir in &private_dirs {
+            std::fs::remove_dir_all(dir).ok();
+        }
         events.send(Event::Exited { session, code }).ok();
         wake();
     });
@@ -771,7 +791,7 @@ mod tests {
         let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
         assert_eq!(p.args, vec!["/args-from:env:RC_MANAGER_FREERDP_ARGS"]);
         assert!(p.interactive, "stdin stays open for certificate questions");
-        assert!(p.env.iter().any(|(k, v)| k == "XDG_CONFIG_HOME" && v.ends_with("rc-manager/freerdp")));
+        assert!(p.env.iter().any(|(k, v)| k == "XDG_CONFIG_HOME" && v.contains("rc-manager/freerdp/run-")));
         let (name, value) = p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap();
         assert_eq!(name, "RC_MANAGER_FREERDP_ARGS");
         let lines: Vec<&str> = value.lines().collect();

@@ -4,4 +4,15 @@ HERE="$(dirname "$(readlink -f "$0")")"
 # when they run on this system. They find their libraries via RPATH, so no LD_LIBRARY_PATH.
 RC_MANAGER_BUNDLE_DIR="$HERE/usr/bin"
 export RC_MANAGER_BUNDLE_DIR
+# libxkbcommon reads the system's keyboard data (Compose files), so a system copy fits it
+# better than the bundled one, which stays as a fallback. RC Manager removes LD_PRELOAD
+# again at start, so the clients it launches do not inherit it.
+LDCONFIG="$(command -v ldconfig || echo /sbin/ldconfig)"
+XKB="$("$LDCONFIG" -p 2>/dev/null | awk '/libxkbcommon\.so\.0 .*x86-64/ {print $NF; exit}')"
+XKBX11="$("$LDCONFIG" -p 2>/dev/null | awk '/libxkbcommon-x11\.so\.0 .*x86-64/ {print $NF; exit}')"
+if [ -n "$XKB" ] && [ -n "$XKBX11" ] && [ -z "$LD_PRELOAD" ]; then
+    LD_PRELOAD="$XKB:$XKBX11"
+    RC_MANAGER_UNSET_PRELOAD=1
+    export LD_PRELOAD RC_MANAGER_UNSET_PRELOAD
+fi
 exec "$HERE/usr/bin/rc-manager" "$@"

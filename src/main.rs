@@ -29,6 +29,12 @@ fn usage() {
 }
 
 fn main() -> anyhow::Result<()> {
+    // AppRun preloads the system's libxkbcommon for RC Manager only; launched clients use
+    // their own libraries.
+    if std::env::var_os("RC_MANAGER_UNSET_PRELOAD").is_some() {
+        std::env::remove_var("LD_PRELOAD");
+        std::env::remove_var("RC_MANAGER_UNSET_PRELOAD");
+    }
     let mut args = std::env::args().skip(1);
     let mut data_dir = store::Store::default_dir();
     let mut custom_dir = false;

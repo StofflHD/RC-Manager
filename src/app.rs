@@ -297,7 +297,11 @@ impl App {
         if !locked {
             app.try_unlock(None);
         }
-        app.tools.freerdp_config = Some(app.store.dir().join("freerdp"));
+        // FreeRDP's configuration lives in temporary per-start directories below this one;
+        // remove leftovers (and the store of 0.4.0, which FreeRDP could not read back).
+        let freerdp_config = app.store.dir().join("freerdp");
+        std::fs::remove_dir_all(&freerdp_config).ok();
+        app.tools.freerdp_config = Some(freerdp_config);
         if app.tools.freerdp.is_none() {
             app.push(Level::Warn, "FreeRDP not found – RDP connections need it installed (Options → External Programs).");
         }
