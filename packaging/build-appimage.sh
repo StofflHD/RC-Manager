@@ -81,6 +81,13 @@ if [ "${BUNDLE_TOOLS:-0}" = "1" ]; then
     LD_LIBRARY_PATH="$FREERDP_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         "$LINUXDEPLOY" --appdir "$APPDIR" "${EXTRA_LIBS[@]}" --executable "$BIN" \
         --executable "$XFREERDP" --executable "$VNCVIEWER" --executable "$SSHPASS" --executable "$XTERM"
+    # Libraries on the exclude list that minimal systems (e.g. a fresh WSL Debian) lack;
+    # libgcrypt of FreeRDP needs libgpg-error. Bundled libraries find them via RPATH.
+    for lib in libgpg-error.so.0; do
+        path="$(ldconfig -p | awk -v l="$lib" '$1 == l && /x86-64/ {print $NF; exit}')"
+        [ -n "$path" ] || { echo "missing library: $lib" >&2; exit 1; }
+        cp -L "$path" "$APPDIR/usr/lib/$lib"
+    done
     # linuxdeploy may replace AppRun; ours exports the bundle directory.
     install -m 755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
     # Licences of the bundled clients.
