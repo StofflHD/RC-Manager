@@ -2823,6 +2823,7 @@ dependencies = [
  "egui",
  "md-5",
  "rand",
+ "raw-window-handle",
  "rfd",
  "rusqlite",
  "serde",
@@ -2830,6 +2831,8 @@ dependencies = [
  "sha1",
  "shell-words",
  "uuid",
+ "winit",
+ "x11rb",
  "zip",
 ]
 

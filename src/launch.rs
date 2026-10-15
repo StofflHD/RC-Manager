@@ -20,7 +20,19 @@ pub struct Tools {
     pub sshpass: Option<String>,
     pub vncviewer: Option<String>,
     pub opener: Option<String>,
+    /// xterm for SSH/Telnet sessions embedded in a tab (`-into`).
+    pub xterm: Option<String>,
     pub home: String,
+}
+
+/// Where an embedded session is drawn: the X11 host window of its tab (see `embed.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct EmbedTarget {
+    pub host: u32,
+    /// Size of the tab in physical pixels.
+    pub width: u32,
+    pub height: u32,
+    pub dark: bool,
 }
 
 pub fn find_in_path(name: &str) -> Option<String> {
@@ -113,6 +125,7 @@ impl Tools {
             sshpass: bundled(&["sshpass"], "-V").or_else(|| find_in_path("sshpass")),
             vncviewer: bundled(&vnc_names, "-help").or_else(|| vnc_names.iter().find_map(|n| find_in_path(n))),
             opener: find_in_path("xdg-open"),
+            xterm: bundled(&["xterm"], "-version").or_else(|| find_in_path("xterm")),
             home: dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
         }
     }
@@ -132,6 +145,7 @@ impl Tools {
             ("sshpass (SSH password)", show(&self.sshpass)),
             ("VNC (TigerVNC)", self.vncviewer.as_deref().map(label).unwrap_or_else(|| "not found – package tigervnc-viewer".into())),
             ("Browser (xdg-open)", show(&self.opener)),
+            ("xterm (SSH in tabs)", show(&self.xterm)),
         ]
     }
 }
@@ -149,6 +163,8 @@ pub struct Plan {
     /// Command line for the log, without passwords
     pub display: String,
     pub warnings: Vec<String>,
+    /// The client opens its own top-level window, which is moved into the tab (TigerVNC).
+    pub adopt_window: bool,
 }
 
 fn secret_path(tag: &str) -> PathBuf {
@@ -219,7 +235,7 @@ pub fn validate_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Result<Plan> {
+pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
     match conn.protocol {
         Protocol::Web => {
             // Without a scheme the text is a host (optionally followed by a path) and gets https://.
@@ -233,15 +249,15 @@ pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Resu
         _ => validate_host(conn.host.trim())?,
     }
     match conn.protocol {
-        Protocol::Rdp => plan_rdp(conn, cred, tools),
-        Protocol::Ssh | Protocol::Telnet => plan_terminal(conn, cred, tools),
-        Protocol::Vnc => plan_vnc(conn, cred, tools),
+        Protocol::Rdp => plan_rdp(conn, cred, tools, embed),
+        Protocol::Ssh | Protocol::Telnet => plan_terminal(conn, cred, tools, embed),
+        Protocol::Vnc => plan_vnc(conn, cred, tools, embed),
         Protocol::Web => plan_web(conn, tools),
         Protocol::External => plan_external(conn, cred),
     }
 }
 
-fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Result<Plan> {
+fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
     let (program, v) = tools.freerdp.clone().ok_or_else(|| anyhow!("FreeRDP is not installed (xfreerdp3/xfreerdp)"))?;
     let v3 = v >= 3;
     let o = &conn.options.rdp;
@@ -262,20 +278,36 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Resu
             secrets.push(c.password.as_str());
         }
     }
-    match o.window_mode {
-        WindowMode::Window => {
-            if let Some((w, h)) = parse_resolution(&o.resolution) {
+    if let Some(e) = embed {
+        // Drawn into the tab. Either the remote resolution follows the tab size, or a fixed
+        // resolution is scaled to it (smart sizing) – the two modes of the original.
+        a.push(format!("/parent-window:{}", e.host));
+        match parse_resolution(&o.resolution).filter(|_| !o.dynamic_resolution) {
+            Some((w, h)) => {
                 a.push(format!("/size:{w}x{h}"));
+                a.push("/smart-sizing".into());
+            }
+            None => {
+                a.push(format!("/size:{}x{}", e.width.max(64), e.height.max(64)));
+                a.push("/dynamic-resolution".into());
             }
         }
-        WindowMode::Fullscreen => a.push("/f".into()),
-        WindowMode::MultiMonitor => {
-            a.push("/f".into());
-            a.push("/multimon".into());
+    } else {
+        match o.window_mode {
+            WindowMode::Tab | WindowMode::Window => {
+                if let Some((w, h)) = parse_resolution(&o.resolution) {
+                    a.push(format!("/size:{w}x{h}"));
+                }
+            }
+            WindowMode::Fullscreen => a.push("/f".into()),
+            WindowMode::MultiMonitor => {
+                a.push("/f".into());
+                a.push("/multimon".into());
+            }
         }
-    }
-    if o.dynamic_resolution {
-        a.push("/dynamic-resolution".into());
+        if o.dynamic_resolution {
+            a.push("/dynamic-resolution".into());
+        }
     }
     if o.color_depth > 0 {
         a.push(format!("/bpp:{}", o.color_depth));
@@ -387,7 +419,21 @@ fn in_terminal(tools: &Tools, title: &str, cmd: Vec<String>) -> Result<(String, 
     Ok((term, args))
 }
 
-fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Result<Plan> {
+/// Runs a command in an xterm drawn into a tab, coloured like RC Manager's theme.
+fn in_xterm(xterm: &str, e: &EmbedTarget, title: &str, cmd: Vec<String>) -> (String, Vec<String>) {
+    let (bg, fg) = if e.dark { ("#101010", "#e1e1e1") } else { ("#ffffff", "#141414") };
+    let mut args: Vec<String> = ["-into", &e.host.to_string(), "-T", title, "-fa", "DejaVu Sans Mono:size=11", "-bg", bg, "-fg", fg, "-cr", "#0066cc"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    args.extend(["+sb", "-bc", "-e", "sh", "-c"].map(String::from));
+    args.push(r#""$@"; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' $s; read _; fi"#.to_string());
+    args.push("rc-manager".to_string());
+    args.extend(cmd);
+    (xterm.to_string(), args)
+}
+
+fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
     let mut plan = Plan::default();
     let mut cmd: Vec<String> = Vec::new();
     let port = conn.effective_port();
@@ -431,7 +477,10 @@ fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools) ->
         }
     }
     plan.display = redact(&cmd, &[]);
-    let (program, args) = in_terminal(tools, &conn.name, cmd)?;
+    let (program, args) = match (embed, &tools.xterm) {
+        (Some(e), Some(xterm)) => in_xterm(xterm, e, &conn.name, cmd),
+        _ => in_terminal(tools, &conn.name, cmd)?,
+    };
     plan.program = program;
     plan.args = args;
     Ok(plan)
@@ -452,7 +501,7 @@ pub fn vnc_password_file(password: &str) -> Vec<u8> {
     ga.to_vec()
 }
 
-fn plan_vnc(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Result<Plan> {
+fn plan_vnc(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
     let port = conn.effective_port();
     let Some(viewer) = tools.vncviewer.clone() else {
         let opener = tools.opener.clone().ok_or_else(|| anyhow!("Neither vncviewer nor xdg-open found"))?;
@@ -460,7 +509,7 @@ fn plan_vnc(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Resu
         return Ok(Plan { program: opener.clone(), display: format!("{opener} {url}"), args: vec![url], ..Default::default() });
     };
     let o = &conn.options.vnc;
-    let mut plan = Plan { program: viewer.clone(), ..Default::default() };
+    let mut plan = Plan { program: viewer.clone(), adopt_window: embed.is_some(), ..Default::default() };
     let mut a = vec![format!("{}::{port}", conn.host.trim())];
     if let Some(c) = cred.filter(|c| !c.password.is_empty()) {
         let file = secret_path("vncpasswd");
@@ -557,7 +606,8 @@ pub fn cleanup_secret_files() {
 }
 
 /// Starts the planned process, forwards its output and cleans up secret files.
-pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() + Send + Clone + 'static) -> Result<()> {
+/// Starts the planned process and returns its process id.
+pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() + Send + Clone + 'static) -> Result<u32> {
     let cleanup: Vec<PathBuf> = plan.secret_files.iter().map(|(p, _)| p.clone()).collect();
     SECRET_FILES.lock().unwrap_or_else(|e| e.into_inner()).extend(cleanup.iter().cloned());
     for (path, content) in &plan.secret_files {
@@ -589,6 +639,7 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
             return Err(e).with_context(|| format!("{} could not be started", plan.program));
         }
     };
+    let pid = child.id();
     if let (Some(input), Some(mut stdin)) = (plan.stdin.clone(), child.stdin.take()) {
         std::thread::spawn(move || {
             stdin.write_all(input.as_bytes()).ok();
@@ -614,7 +665,7 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
         events.send(Event::Exited { session, code }).ok();
         wake();
     });
-    Ok(())
+    Ok(pid)
 }
 
 #[cfg(test)]
@@ -628,6 +679,7 @@ mod tests {
             sshpass: Some("/usr/bin/sshpass".into()),
             vncviewer: Some("/usr/bin/vncviewer".into()),
             opener: Some("/usr/bin/xdg-open".into()),
+            xterm: Some("/usr/bin/xterm".into()),
             home: "/home/test".into(),
         }
     }
@@ -643,7 +695,7 @@ mod tests {
         c.port = 3390;
         c.options.rdp.resolution = "1280x720".into();
         c.options.rdp.dynamic_resolution = false;
-        let p = plan(&c, Some(&cred()), &tools(3)).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(3), None).unwrap();
         assert_eq!(p.args, vec!["/args-from:stdin"]);
         let stdin = p.stdin.unwrap();
         let lines: Vec<&str> = stdin.lines().collect();
@@ -662,7 +714,7 @@ mod tests {
         c.options.rdp.ignore_certificate = true;
         c.options.rdp.window_mode = WindowMode::MultiMonitor;
         c.options.rdp.gateway = "gw.example".into();
-        let p = plan(&c, Some(&cred()), &tools(2)).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(2), None).unwrap();
         assert!(p.stdin.is_none());
         assert!(p.args.contains(&"/cert-ignore".to_string()));
         assert!(p.args.contains(&"/multimon".to_string()));
@@ -676,7 +728,7 @@ mod tests {
         let mut c = Connection::new("Linux", Protocol::Ssh, None);
         c.host = "box".into();
         c.port = 2222;
-        let p = plan(&c, Some(&cred()), &tools(3)).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(3), None).unwrap();
         assert_eq!(p.program, "/usr/bin/xterm");
         let pos = p.args.iter().position(|a| a == "/usr/bin/sshpass").unwrap();
         assert_eq!(p.args[pos + 1], "-f");
@@ -698,7 +750,7 @@ mod tests {
         c.host = "srv".into();
         c.options.external.command = "remmina -c 'rdp://{U}@{T}:{PORT}'".into();
         c.port = 3389;
-        let p = plan(&c, Some(&cred()), &tools(3)).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(3), None).unwrap();
         assert_eq!(p.program, "remmina");
         assert_eq!(p.args, vec!["-c", "rdp://admin@srv:3389"]);
     }
@@ -711,7 +763,7 @@ mod tests {
                 let mut c = Connection::new("x", proto, None);
                 c.host = host.into();
                 c.options.external.command = "sh -c 'ping {T}'".into();
-                assert!(plan(&c, None, &tools(3)).is_err(), "{proto:?} accepted host {host:?}");
+                assert!(plan(&c, None, &tools(3), None).is_err(), "{proto:?} accepted host {host:?}");
             }
         }
     }
@@ -721,11 +773,11 @@ mod tests {
         for url in ["file:///etc/passwd", "smb://evil/share", "javascript:alert(1)", "-x", "https://ok.example/ path"] {
             let mut c = Connection::new("W", Protocol::Web, None);
             c.host = url.into();
-            assert!(plan(&c, None, &tools(3)).is_err(), "accepted {url:?}");
+            assert!(plan(&c, None, &tools(3), None).is_err(), "accepted {url:?}");
         }
         let mut c = Connection::new("W", Protocol::Web, None);
         c.host = "http://intranet/app?x=1".into();
-        assert!(plan(&c, None, &tools(3)).is_ok());
+        assert!(plan(&c, None, &tools(3), None).is_ok());
     }
 
     #[test]
@@ -736,16 +788,45 @@ mod tests {
         for (kbd, res) in [("00000000", "0x0"), ("", ""), ("zz", "800x"), ("0x0", "x600")] {
             c.options.rdp.keyboard_layout = kbd.into();
             c.options.rdp.resolution = res.into();
-            let p = plan(&c, None, &tools(2)).unwrap();
+            let p = plan(&c, None, &tools(2), None).unwrap();
             assert!(!p.args.iter().any(|a| a.starts_with("/kbd") || a.starts_with("/size")), "{kbd:?} {res:?}: {:?}", p.args);
         }
         c.options.rdp.keyboard_layout = "00000407".into();
         c.options.rdp.resolution = "1280X720".into();
-        let p = plan(&c, None, &tools(2)).unwrap();
+        let p = plan(&c, None, &tools(2), None).unwrap();
         assert!(p.args.contains(&"/kbd:0x00000407".to_string()));
         assert!(p.args.contains(&"/size:1280x720".to_string()));
-        let p = plan(&c, None, &tools(3)).unwrap();
+        let p = plan(&c, None, &tools(3), None).unwrap();
         assert!(p.stdin.unwrap().lines().any(|l| l == "/kbd:layout:0x00000407"));
+    }
+
+    #[test]
+    fn embedded_sessions() {
+        let e = EmbedTarget { host: 4242, width: 1000, height: 700, dark: true };
+        let mut c = Connection::new("Srv", Protocol::Rdp, None);
+        c.host = "srv".into();
+        let p = plan(&c, None, &tools(2), Some(&e)).unwrap();
+        assert!(p.args.contains(&"/parent-window:4242".to_string()));
+        assert!(p.args.contains(&"/size:1000x700".to_string()));
+        assert!(p.args.contains(&"/dynamic-resolution".to_string()));
+        assert!(!p.args.iter().any(|a| a == "/f"));
+        // Fixed resolution: scaled into the tab.
+        c.options.rdp.dynamic_resolution = false;
+        c.options.rdp.resolution = "1280x1024".into();
+        let p = plan(&c, None, &tools(2), Some(&e)).unwrap();
+        assert!(p.args.contains(&"/size:1280x1024".to_string()) && p.args.contains(&"/smart-sizing".to_string()));
+
+        let mut c = Connection::new("Box", Protocol::Ssh, None);
+        c.host = "box".into();
+        let p = plan(&c, None, &tools(3), Some(&e)).unwrap();
+        assert_eq!(p.program, "/usr/bin/xterm");
+        assert_eq!(&p.args[..2], ["-into", "4242"]);
+        assert!(p.args.ends_with(&["ssh".to_string(), "--".to_string(), "box".to_string()]));
+
+        let mut c = Connection::new("V", Protocol::Vnc, None);
+        c.host = "v".into();
+        assert!(plan(&c, None, &tools(3), Some(&e)).unwrap().adopt_window);
+        assert!(!plan(&c, None, &tools(3), None).unwrap().adopt_window);
     }
 
     #[test]

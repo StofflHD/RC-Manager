@@ -1,6 +1,7 @@
 //! Main window: connection tree on the left, properties on the right, sessions and log at the bottom.
 
-use crate::launch::{self, Event, Tools};
+use crate::embed::Embedder;
+use crate::launch::{self, EmbedTarget, Event, Tools};
 use crate::legacy::{backup, import as legacy_import, rdpfile};
 use crate::model::*;
 use crate::net;
@@ -24,11 +25,13 @@ struct Settings {
     log_hidden: bool,
     /// Minutes of inactivity before the app locks itself (only with a master password; 0 = never).
     auto_lock_minutes: u32,
+    /// Open RDP, SSH/Telnet and VNC sessions as tabs inside the window (X11/XWayland).
+    embed_sessions: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { dark: false, quick_protocol: Protocol::Rdp, sidebar_collapsed: false, log_hidden: false, auto_lock_minutes: 15 }
+        Self { dark: false, quick_protocol: Protocol::Rdp, sidebar_collapsed: false, log_hidden: false, auto_lock_minutes: 15, embed_sessions: true }
     }
 }
 
@@ -73,6 +76,20 @@ struct Session {
     name: String,
     started: Instant,
     display: String,
+    pid: u32,
+}
+
+/// A session shown as a tab; its client draws into the X11 window `host`.
+struct SessionTab {
+    session: u64,
+    name: String,
+    icon: &'static str,
+    host: u32,
+    /// TigerVNC opens its own window, which is moved into the tab once it appears.
+    adopt: Option<(u32, Instant)>,
+    /// Last geometry given to the host (physical pixels) and whether it was visible.
+    placed: Option<(i32, i32, u32, u32, bool)>,
+    last_fit: Instant,
 }
 
 /// Asks for credentials right before connecting.
@@ -138,6 +155,19 @@ pub struct App {
     /// Answer of a native file dialog running on its own thread.
     picker: Option<Receiver<Option<Picked>>>,
 
+    /// X11 embedding of sessions; `None` without X11 or when switched off.
+    embedder: Option<Embedder>,
+    embed_checked: bool,
+    tabs: Vec<SessionTab>,
+    /// Session shown in the central area; `None` shows the connection properties.
+    active_tab: Option<u64>,
+    /// Central area of the active session tab (points), set while drawing.
+    session_rect: Option<egui::Rect>,
+    /// Session that has the keyboard focus.
+    session_focus: Option<u64>,
+    /// Connections to open at start (`--connect`).
+    pending_connect: Vec<String>,
+
     log: VecDeque<LogLine>,
     sessions: BTreeMap<u64, Session>,
     next_session: u64,
@@ -175,7 +205,7 @@ fn now_string() -> String {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, tools: Tools) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, store: Store, tools: Tools, connect: Vec<String>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
         let s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
         let (events_tx, events_rx) = channel();
@@ -199,6 +229,13 @@ impl App {
             log_unseen: 0,
             last_activity: Instant::now(),
             picker: None,
+            embedder: None,
+            embed_checked: false,
+            tabs: Vec::new(),
+            active_tab: None,
+            session_rect: None,
+            session_focus: None,
+            pending_connect: connect,
             log: VecDeque::new(),
             sessions: BTreeMap::new(),
             next_session: 1,
@@ -542,10 +579,42 @@ impl App {
         self.launch(&conn, cred.as_ref());
     }
 
+    /// Creates the tab window for a session that should be embedded.
+    fn embed_target(&mut self, conn: &Connection) -> Option<EmbedTarget> {
+        if !self.s.embed_sessions {
+            return None;
+        }
+        let emb = self.embedder.as_ref()?;
+        let wanted = match conn.protocol {
+            Protocol::Rdp => conn.options.rdp.window_mode == WindowMode::Tab,
+            Protocol::Ssh | Protocol::Telnet => self.tools.xterm.is_some(),
+            Protocol::Vnc => self.tools.vncviewer.is_some() && emb.can_adopt(),
+            Protocol::Web | Protocol::External => false,
+        };
+        if !wanted {
+            return None;
+        }
+        let host = match emb.create_host() {
+            Ok(h) => h,
+            Err(e) => {
+                self.push(Level::Warn, format!("Cannot create a tab window, opening a separate window: {e:#}"));
+                return None;
+            }
+        };
+        // Size of the session area: the last one drawn, or the central panel's.
+        let ppp = self.ctx.pixels_per_point();
+        let rect = self.session_rect.unwrap_or_else(|| self.ctx.available_rect());
+        Some(EmbedTarget { host, width: (rect.width() * ppp) as u32, height: (rect.height() * ppp) as u32, dark: self.s.dark })
+    }
+
     fn launch(&mut self, conn: &Connection, cred: Option<&Credential>) {
-        let plan = match launch::plan(conn, cred, &self.tools) {
+        let embed = self.embed_target(conn);
+        let plan = match launch::plan(conn, cred, &self.tools, embed.as_ref()) {
             Ok(p) => p,
             Err(e) => {
+                if let (Some(emb), Some(t)) = (&self.embedder, &embed) {
+                    emb.destroy(t.host);
+                }
                 self.push(Level::Error, format!("{}: {e:#}", conn.name));
                 return;
             }
@@ -557,9 +626,22 @@ impl App {
         self.next_session += 1;
         let ctx = self.ctx.clone();
         match launch::spawn(&plan, session, self.events_tx.clone(), move || ctx.request_repaint()) {
-            Ok(()) => {
+            Ok(pid) => {
                 self.push(Level::Info, format!("[{session}] {} started: {}", conn.name, plan.display));
-                self.sessions.insert(session, Session { name: conn.name.clone(), started: Instant::now(), display: plan.display.clone() });
+                self.sessions.insert(session, Session { name: conn.name.clone(), started: Instant::now(), display: plan.display.clone(), pid });
+                if let Some(t) = embed {
+                    self.tabs.push(SessionTab {
+                        session,
+                        name: conn.name.clone(),
+                        icon: conn.protocol.icon(),
+                        host: t.host,
+                        adopt: plan.adopt_window.then(|| (pid, Instant::now())),
+                        placed: None,
+                        last_fit: Instant::now(),
+                    });
+                    self.active_tab = Some(session);
+                    self.session_focus = None;
+                }
                 if let Some(mut c) = self.connection(conn.id).cloned() {
                     c.last_connected = Some(now_string());
                     self.result(self.store.save_connection(&c));
@@ -575,7 +657,12 @@ impl App {
                     }
                 }
             }
-            Err(e) => self.push(Level::Error, format!("{}: {e:#}", conn.name)),
+            Err(e) => {
+                if let (Some(emb), Some(t)) = (&self.embedder, &embed) {
+                    emb.destroy(t.host);
+                }
+                self.push(Level::Error, format!("{}: {e:#}", conn.name))
+            }
         }
     }
 
@@ -614,6 +701,7 @@ impl App {
                         let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
                         self.push(lvl, format!("[{session}] {} ended (exit code {code}, {}m {}s).", s.name, dur / 60, dur % 60));
                     }
+                    self.remove_tab(session);
                 }
             }
         }
@@ -669,6 +757,8 @@ impl App {
                 });
                 ui.menu_button("Options", |ui| {
                     ui.checkbox(&mut self.s.dark, "Dark Theme");
+                    let embed_hint = if self.embedder.is_some() { "Sessions open as tabs inside this window" } else { "Needs X11 or XWayland" };
+                    ui.checkbox(&mut self.s.embed_sessions, "Open Sessions in Tabs").on_hover_text(embed_hint);
                     let mut shown = !self.s.sidebar_collapsed;
                     if ui.checkbox(&mut shown, "Show Sidebar (Ctrl+B)").changed() {
                         self.s.sidebar_collapsed = !shown;
@@ -969,6 +1059,64 @@ impl App {
 
     fn ui_editor(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            self.session_rect = None;
+            if !self.tabs.is_empty() {
+                self.tab_strip(ui);
+                ui.add_space(2.0);
+            }
+            match self.active_tab {
+                Some(id) if self.tabs.iter().any(|t| t.session == id) => self.session_area(ui, id),
+                _ => self.editor_contents(ui, actions),
+            }
+        });
+    }
+
+    fn tab_strip(&mut self, ui: &mut egui::Ui) {
+        let mut close = None;
+        egui::ScrollArea::horizontal().id_salt("session_tabs").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let props = RichText::new("🗐 Properties");
+                let sel = self.active_tab.is_none();
+                if ui.add(egui::SelectableLabel::new(sel, if sel { props.strong() } else { props })).clicked() {
+                    self.active_tab = None;
+                }
+                for t in &self.tabs {
+                    ui.separator();
+                    let sel = self.active_tab == Some(t.session);
+                    let text = RichText::new(format!("{} {}", t.icon, t.name));
+                    let r = ui.add(egui::SelectableLabel::new(sel, if sel { text.strong() } else { text }));
+                    if r.clicked() {
+                        self.active_tab = Some(t.session);
+                        self.session_focus = None;
+                    }
+                    if r.middle_clicked() {
+                        close = Some(t.session);
+                    }
+                    if ui.small_button("✖").on_hover_text("Close session").clicked() {
+                        close = Some(t.session);
+                    }
+                }
+            });
+        });
+        if let Some(id) = close {
+            self.stop_session(id);
+        }
+    }
+
+    /// Reserves the area the active session's window is placed over.
+    fn session_area(&mut self, ui: &mut egui::Ui, id: u64) {
+        let rect = ui.available_rect_before_wrap();
+        ui.allocate_rect(rect, egui::Sense::hover());
+        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(if self.s.dark { 16 } else { 32 }));
+        let waiting = self.tabs.iter().find(|t| t.session == id).map(|t| t.adopt.is_some()).unwrap_or(false);
+        let text = if waiting { "Waiting for the session window …" } else { "Connecting …" };
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), egui::Color32::from_gray(160));
+        self.session_rect = Some(rect);
+    }
+
+    fn editor_contents(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        {
             let Some(mut editor) = self.editor.clone() else {
                 ui.centered_and_justified(|ui| ui.label(RichText::new("Select a connection or folder.\nDouble-click connects.").weak()));
                 return;
@@ -1078,7 +1226,7 @@ impl App {
                 });
             });
             self.editor = Some(editor);
-        });
+        }
     }
 
     fn protocol_options(ui: &mut egui::Ui, c: &mut Connection) {
@@ -1089,7 +1237,7 @@ impl App {
                     egui::Grid::new("rdp_disp").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                         ui.label("Mode");
                         egui::ComboBox::from_id_salt("rdp_mode").selected_text(o.window_mode.label()).show_ui(ui, |ui| {
-                            for m in [WindowMode::Window, WindowMode::Fullscreen, WindowMode::MultiMonitor] {
+                            for m in [WindowMode::Tab, WindowMode::Window, WindowMode::Fullscreen, WindowMode::MultiMonitor] {
                                 ui.selectable_value(&mut o.window_mode, m, m.label());
                             }
                         });
@@ -1789,6 +1937,142 @@ impl App {
         }
     }
 
+    fn remove_tab(&mut self, session: u64) {
+        if let Some(pos) = self.tabs.iter().position(|t| t.session == session) {
+            let tab = self.tabs.remove(pos);
+            if let Some(emb) = &self.embedder {
+                emb.destroy(tab.host);
+                if self.session_focus == Some(session) {
+                    emb.focus(None);
+                }
+            }
+            if self.session_focus == Some(session) {
+                self.session_focus = None;
+            }
+            if self.active_tab == Some(session) {
+                self.active_tab = self.tabs.get(pos.saturating_sub(1)).or(self.tabs.first()).map(|t| t.session);
+            }
+        }
+    }
+
+    /// Ends a session (closing its tab follows when the process has exited).
+    fn stop_session(&mut self, session: u64) {
+        if let Some(s) = self.sessions.get(&session) {
+            #[cfg(unix)]
+            {
+                std::process::Command::new("kill").arg(s.pid.to_string()).status().ok();
+            }
+            #[cfg(not(unix))]
+            {
+                std::process::Command::new("taskkill").args(["/PID", &s.pid.to_string()]).status().ok();
+            }
+        }
+    }
+
+    /// Connects to the X server once RC Manager's window exists.
+    fn init_embedding(&mut self, frame: &eframe::Frame) {
+        if self.embed_checked {
+            return;
+        }
+        self.embed_checked = true;
+        let Some(main) = crate::embed::main_window(frame) else {
+            self.push(Level::Info, "Sessions open in separate windows (tabs need X11 or XWayland).");
+            return;
+        };
+        match Embedder::connect(main) {
+            Ok(e) => self.embedder = Some(e),
+            Err(e) => self.push(Level::Warn, format!("Sessions open in separate windows: {e:#}")),
+        }
+    }
+
+    /// Places the session windows over their tab area each frame. X11 child windows are
+    /// drawn above everything egui paints, so a session is hidden while a menu, popup,
+    /// dialog or the sidebar overlay covers its area.
+    fn sync_embedded(&mut self, ctx: &egui::Context) {
+        let Some(emb) = &self.embedder else { return };
+        if self.tabs.is_empty() {
+            return;
+        }
+        let ppp = ctx.pixels_per_point();
+        let rect = if self.locked { None } else { self.session_rect };
+        let covered = rect.is_some_and(|r| {
+            ctx.memory(|m| {
+                m.areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::Tooltip))
+                    .any(|l| m.area_rect(l.id).is_some_and(|a| a.intersects(r)))
+            })
+        });
+        let mut logs = Vec::new();
+        let mut focus_change = None;
+        for tab in &mut self.tabs {
+            // TigerVNC: move its window into the tab as soon as it appears.
+            if let Some((pid, since)) = tab.adopt {
+                if let Some(win) = emb.window_of_pid(pid) {
+                    match emb.adopt(win, tab.host) {
+                        Ok(()) => tab.adopt = None,
+                        Err(e) => logs.push((Level::Warn, format!("{}: cannot move the VNC window into the tab: {e:#}", tab.name))),
+                    }
+                    tab.placed = None;
+                } else if since.elapsed() > Duration::from_secs(30) {
+                    tab.adopt = None;
+                    logs.push((Level::Warn, format!("{}: the VNC window was not found; it stays a separate window.", tab.name)));
+                }
+            }
+            let visible = Some(tab.session) == self.active_tab && rect.is_some() && !covered;
+            let geom = match rect.filter(|_| visible) {
+                Some(r) => (
+                    (r.min.x * ppp).round() as i32,
+                    (r.min.y * ppp).round() as i32,
+                    (r.width() * ppp).round().max(1.0) as u32,
+                    (r.height() * ppp).round().max(1.0) as u32,
+                    true,
+                ),
+                None => tab.placed.map(|(x, y, w, h, _)| (x, y, w, h, false)).unwrap_or((0, 0, 1, 1, false)),
+            };
+            // Clients create their window a moment after starting: fit them again now and then.
+            let refit = visible && tab.last_fit.elapsed() > Duration::from_millis(500);
+            if tab.placed != Some(geom) || refit {
+                if let Err(e) = emb.place(tab.host, geom.0, geom.1, geom.2, geom.3, geom.4) {
+                    logs.push((Level::Warn, format!("{}: {e:#}", tab.name)));
+                }
+                tab.placed = Some(geom);
+                tab.last_fit = Instant::now();
+            }
+            // Keyboard: a click into the session gives it the focus.
+            if visible && self.session_focus != Some(tab.session) {
+                if let Some(p) = emb.pointer() {
+                    let inside = p.x >= geom.0 && p.y >= geom.1 && p.x < geom.0 + geom.2 as i32 && p.y < geom.1 + geom.3 as i32;
+                    if p.pressed && inside {
+                        focus_change = Some(Some((tab.session, tab.host)));
+                    }
+                }
+            }
+        }
+        // A click or text input in RC Manager itself takes the keyboard back.
+        let rc_click = ctx.input(|i| i.pointer.any_pressed()) || ctx.wants_keyboard_input();
+        if self.session_focus.is_some() && rc_click {
+            focus_change = Some(None);
+        }
+        match focus_change {
+            Some(Some((session, host))) => {
+                emb.focus(emb.client_of(host));
+                self.session_focus = Some(session);
+            }
+            Some(None) => {
+                emb.focus(None);
+                self.session_focus = None;
+            }
+            None => {}
+        }
+        for (lvl, msg) in logs {
+            self.push(lvl, msg);
+        }
+        // Poll the pointer and window state while a session is shown.
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+
     /// Drops all decrypted data and shows the unlock screen (only with a master password,
     /// otherwise the key file would unlock it again without asking).
     fn lock_now(&mut self, reason: &str) {
@@ -1929,8 +2213,9 @@ impl eframe::App for App {
         eframe::set_value(storage, eframe::APP_KEY, &self.s);
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         theme::apply_style(ctx, self.s.dark);
+        self.init_embedding(frame);
         self.poll_events();
         self.poll_picker();
         if !self.locked {
@@ -1938,7 +2223,17 @@ impl eframe::App for App {
         }
         if self.locked {
             self.ui_locked(ctx);
+            // Never show a session over the unlock screen.
+            self.sync_embedded(ctx);
             return;
+        }
+        if !self.pending_connect.is_empty() {
+            for name in std::mem::take(&mut self.pending_connect) {
+                match self.data.connections.iter().find(|c| c.name.eq_ignore_ascii_case(&name)).map(|c| c.id) {
+                    Some(id) => self.apply(Action::Connect(id)),
+                    None => self.push(Level::Warn, format!("--connect: no connection named \"{name}\"")),
+                }
+            }
         }
         let mut actions = Vec::new();
         self.ui_menu(ctx, &mut actions);
@@ -1949,6 +2244,7 @@ impl eframe::App for App {
         for a in actions {
             self.apply(a);
         }
+        self.sync_embedded(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

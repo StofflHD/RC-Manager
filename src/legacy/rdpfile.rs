@@ -56,7 +56,7 @@ pub fn parse(name: &str, content: &[u8], parent: Option<Uuid>) -> Result<RdpFile
             }
             "domain" if !val.is_empty() => domain = val.to_string(),
             "screen mode id" => {
-                if val == "2" && o.window_mode == WindowMode::Window {
+                if val == "2" && o.window_mode == WindowMode::Tab {
                     o.window_mode = WindowMode::Fullscreen;
                 }
             }
@@ -85,7 +85,7 @@ pub fn parse(name: &str, content: &[u8], parent: Option<Uuid>) -> Result<RdpFile
     if c.host.is_empty() {
         bail!("No target address (\"full address\") found");
     }
-    if width > 0 && height > 0 && c.options.rdp.window_mode == WindowMode::Window {
+    if width > 0 && height > 0 && c.options.rdp.window_mode == WindowMode::Tab {
         c.options.rdp.resolution = format!("{width}x{height}");
     }
     c.port = if port == 3389 { 0 } else { port };

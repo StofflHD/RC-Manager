@@ -74,7 +74,9 @@ pub enum CredentialRef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WindowMode {
+    /// Tab inside RC Manager's window, scaled with it (like the original's default).
     #[default]
+    Tab,
     Window,
     Fullscreen,
     MultiMonitor,
@@ -83,7 +85,8 @@ pub enum WindowMode {
 impl WindowMode {
     pub fn label(self) -> &'static str {
         match self {
-            WindowMode::Window => "Window",
+            WindowMode::Tab => "Tab in RC Manager",
+            WindowMode::Window => "Separate window",
             WindowMode::Fullscreen => "Full screen",
             WindowMode::MultiMonitor => "Full screen (all monitors)",
         }
@@ -120,7 +123,7 @@ pub struct RdpOptions {
 impl Default for RdpOptions {
     fn default() -> Self {
         Self {
-            window_mode: WindowMode::Window,
+            window_mode: WindowMode::Tab,
             resolution: String::new(),
             dynamic_resolution: true,
             color_depth: 0,

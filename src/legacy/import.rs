@@ -465,9 +465,10 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warni
             // WindowResolution for 1 and 5; its setter forces 800x600 for every connection.
             let window_type = f.int(&["WindowType"]).unwrap_or(0);
             o.window_mode = match window_type {
+                1 => WindowMode::Window,
                 2 | 4 => WindowMode::Fullscreen,
                 3 => WindowMode::MultiMonitor,
-                _ => WindowMode::Window,
+                _ => WindowMode::Tab,
             };
             if matches!(window_type, 1 | 5) {
                 if let Some(res) = f.string(&["WindowResolution"]).and_then(|r| crate::launch::parse_resolution(&r)) {
@@ -636,7 +637,7 @@ mod tests {
         apply_settings(&mut c, &f, &mut port, &mut Vec::new());
         let o = &c.options.rdp;
         assert_eq!(o.keyboard_layout, "", "00000000 = no preselection");
-        assert_eq!(o.window_mode, WindowMode::Window);
+        assert_eq!(o.window_mode, WindowMode::Tab);
         assert_eq!(o.resolution, "", "tabbed connections fit the window");
         assert!(o.dynamic_resolution);
         assert_eq!(o.gateway, "", "gateway type 0 = no gateway");

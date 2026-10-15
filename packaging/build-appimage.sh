@@ -5,8 +5,8 @@
 # loaded at runtime from the host system, as with any desktop application.
 #
 # With BUNDLE_TOOLS=1 the clients are shipped inside the AppImage as well:
-#   FreeRDP (xfreerdp, from FREERDP_PREFIX, default /opt/freerdp), TigerVNC (vncviewer)
-#   and sshpass, each with the libraries they need (via linuxdeploy). The AppImage then
+#   FreeRDP (xfreerdp, from FREERDP_PREFIX, default /opt/freerdp), TigerVNC (vncviewer),
+#   sshpass and xterm (SSH/Telnet in tabs), each with the libraries they need (via linuxdeploy). The AppImage then
 #   requires the glibc of the build machine. RC Manager prefers these bundled clients and
 #   falls back to installed ones if a bundled client cannot run.
 #
@@ -61,23 +61,24 @@ if [ "${BUNDLE_TOOLS:-0}" = "1" ]; then
     done
     VNCVIEWER="$(readlink -f "$(command -v vncviewer)")"
     SSHPASS="$(command -v sshpass)"
-    for b in "$XFREERDP" "$VNCVIEWER" "$SSHPASS"; do
+    XTERM="$(command -v xterm)"
+    for b in "$XFREERDP" "$VNCVIEWER" "$SSHPASS" "$XTERM"; do
         [ -x "$b" ] || { echo "missing client: '$b'" >&2; exit 1; }
     done
-    echo "==> Bundling $XFREERDP, $VNCVIEWER, $SSHPASS"
+    echo "==> Bundling $XFREERDP, $VNCVIEWER, $SSHPASS, $XTERM"
     LINUXDEPLOY="${LINUXDEPLOY:-$WORK/linuxdeploy-x86_64.AppImage}"
     fetch "$LINUXDEPLOY" https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
     # linuxdeploy copies each binary to usr/bin, its libraries to usr/lib (except the
     # base system libraries on the AppImage exclude list) and points RPATH at usr/lib.
     LD_LIBRARY_PATH="$FREERDP_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         "$LINUXDEPLOY" --appdir "$APPDIR" \
-        --executable "$XFREERDP" --executable "$VNCVIEWER" --executable "$SSHPASS"
+        --executable "$XFREERDP" --executable "$VNCVIEWER" --executable "$SSHPASS" --executable "$XTERM"
     # linuxdeploy may replace AppRun; ours exports the bundle directory.
     install -m 755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
     # Licences of the bundled clients.
     mkdir -p "$APPDIR/usr/share/doc/rc-manager"
     cp "$FREERDP_PREFIX/share/doc/freerdp-LICENSE" "$APPDIR/usr/share/doc/rc-manager/FreeRDP-LICENSE" 2>/dev/null || true
-    for pkg in tigervnc-viewer sshpass; do
+    for pkg in tigervnc-viewer sshpass xterm; do
         [ -f "/usr/share/doc/$pkg/copyright" ] && cp "/usr/share/doc/$pkg/copyright" "$APPDIR/usr/share/doc/rc-manager/$pkg-copyright"
     done
 fi

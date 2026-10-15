@@ -1,6 +1,7 @@
 //! RC Manager for Linux – a re-implementation of the Windows program "RDP-Manager" (Cinspiration).
 
 mod app;
+mod embed;
 mod launch;
 mod legacy;
 mod model;
@@ -34,6 +35,7 @@ fn main() -> anyhow::Result<()> {
     let mut import: Option<PathBuf> = None;
     let mut app_password: Option<String> = None;
     let mut list = false;
+    let mut connect = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
@@ -47,6 +49,7 @@ fn main() -> anyhow::Result<()> {
             "--import" => import = Some(PathBuf::from(args.next().ok_or_else(|| anyhow::anyhow!("--import expects a path"))?)),
             "--app-password" => app_password = args.next(),
             "--list" => list = true,
+            "--connect" => connect.push(args.next().ok_or_else(|| anyhow::anyhow!("--connect expects a connection name"))?),
             "--tools" => {
                 for (name, value) in launch::Tools::detect().summary() {
                     println!("{name:<24} {value}");
@@ -99,7 +102,18 @@ fn main() -> anyhow::Result<()> {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/rc-manager.png")) {
         viewport = viewport.with_icon(icon);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("RC Manager", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, store, tools)))))
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    // Sessions are embedded as X11 child windows; on Wayland desktops RC Manager therefore
+    // runs via XWayland (set RC_MANAGER_WAYLAND=1 for native Wayland, sessions then open in
+    // separate windows).
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some() && std::env::var_os("RC_MANAGER_WAYLAND").is_none() {
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11;
+            builder.with_x11();
+        }));
+    }
+    eframe::run_native("RC Manager", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, store, tools, connect)))))
         .map_err(|e| anyhow::anyhow!("{e}"))
 }

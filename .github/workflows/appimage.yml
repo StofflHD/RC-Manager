@@ -31,7 +31,7 @@ jobs:
             libx11-dev libxext-dev libxinerama-dev libxcursor-dev libxdamage-dev libxv-dev \
             libxkbfile-dev libxi-dev libxrandr-dev libxrender-dev libxfixes-dev libxtst-dev \
             libxkbcommon-dev libasound2-dev libpulse-dev libcups2-dev libpcsclite-dev \
-            tigervnc-viewer sshpass
+            tigervnc-viewer sshpass xterm             xvfb xrdp imagemagick xdotool x11-utils libgl1-mesa-dri libegl1
 
       - name: Cache FreeRDP
         id: freerdp-cache
@@ -94,13 +94,60 @@ jobs:
           squashfs-root/usr/bin/sshpass -V > sshpass.txt 2>&1 || true
           head -1 sshpass.txt
           squashfs-root/AppRun --tools | tee tools.txt
-          test "$(grep -c 'bundled with the AppImage' tools.txt)" = 3
+          test "$(grep -c 'bundled with the AppImage' tools.txt)" = 4
           export APPIMAGE_EXTRACT_AND_RUN=1
           DATA=$(mktemp -d)
           "$APP" --data-dir "$DATA" --import tests/fixtures/legacy.db3
           "$APP" --data-dir "$DATA" --list | tee list.txt
           grep -q "DC01" list.txt
           sudo mv "$FREERDP_PREFIX.hidden" "$FREERDP_PREFIX"
+          # The extracted copy stays for the GUI test.
+
+      # Sessions embedded as tabs: a virtual X server, a local RDP server (xrdp) and
+      # screenshots before and after resizing RC Manager's window.
+      - name: GUI test (Xvfb, xrdp)
+        run: |
+          sudo adduser xrdp ssl-cert || true
+          sudo systemctl restart xrdp
+          sleep 2
+          python3 - <<'EOF'
+          import shutil, sqlite3
+          shutil.copy('tests/fixtures/legacy.db3', 'gui-test.db3')
+          db = sqlite3.connect('gui-test.db3')
+          db.execute("UPDATE Connections SET Target='127.0.0.1' WHERE Name IN ('DC01', 'Linux-Box')")
+          db.execute("DELETE FROM FolderSetting")
+          db.commit()
+          EOF
+          Xvfb :99 -screen 0 1920x1200x24 &
+          export DISPLAY=:99
+          sleep 2
+          mkdir -p gui
+          DATA=$(mktemp -d)
+          squashfs-root/AppRun --data-dir "$DATA" --import gui-test.db3
+          squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp.log 2>&1 &
+          APP=$!
+          sleep 15
+          import -window root gui/1-rdp-tab.png
+          xwininfo -root -tree > gui/1-windows.txt
+          WID=$(xdotool search --name '^RC Manager$' | head -1)
+          xdotool windowsize "$WID" 1700 1100
+          sleep 10
+          import -window root gui/2-rdp-resized.png
+          xwininfo -root -tree > gui/2-windows.txt
+          kill $APP || true
+          sleep 3
+          squashfs-root/AppRun --data-dir "$DATA" --connect Linux-Box > gui/app-ssh.log 2>&1 &
+          APP=$!
+          sleep 10
+          import -window root gui/3-ssh-tab.png
+          xwininfo -root -tree > gui/3-windows.txt
+          kill $APP || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-test
+          path: gui/
 
       - uses: actions/upload-artifact@v4
         with:
