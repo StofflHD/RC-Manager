@@ -94,9 +94,14 @@ struct PromptDialog {
     changed: bool,
 }
 
-/// Reads "Certificate details for 127.0.0.1:3390 (RDP-Server):" and "Thumbprint: 56:30:…".
+/// Reads "Certificate details for 127.0.0.1:3390 (RDP-Server):" (or FreeRDP's
+/// "!!!Certificate for 127.0.0.1:3390 (RDP-Server) has changed!!!") and the first
+/// "Thumbprint: 56:30:…", which is the one of the certificate presented now.
 fn certificate_of(details: &[String]) -> Option<(String, String)> {
-    let host_port = details.iter().find_map(|l| l.trim().strip_prefix("Certificate details for "))?;
+    let host_port = details.iter().find_map(|l| {
+        let l = l.trim();
+        l.strip_prefix("Certificate details for ").or_else(|| l.strip_prefix("!!!Certificate for "))
+    })?;
     let host_port = host_port.split([' ', ':']).collect::<Vec<_>>();
     let host_port = format!("{}:{}", host_port.first()?, host_port.get(1)?.trim_end_matches(':'));
     let thumb = details.iter().find_map(|l| l.trim().strip_prefix("Thumbprint:"))?;
@@ -737,12 +742,12 @@ impl App {
             match ev {
                 Event::Prompt { session, text } => {
                     if let Some(s) = self.sessions.get(&session) {
-                        // Certificate details: the lines after "Certificate details" or the banner.
-                        // The details block starts with "Certificate details for host:port".
+                        // The details block starts with "Certificate details for host:port" (or
+                        // "!!!Certificate for host:port … has changed!!!").
                         let start = s
                             .recent
                             .iter()
-                            .rposition(|l| l.contains("Certificate details for"))
+                            .rposition(|l| l.contains("Certificate details for") || l.contains("!!!Certificate for"))
                             .unwrap_or(s.recent.len().saturating_sub(12));
                         let details: Vec<String> = s.recent.iter().skip(start).map(|l| strip_log_prefix(l)).filter(|l| !l.trim().is_empty() && !l.contains("@@@@")).collect();
                         let certificate = certificate_of(&details);
@@ -1661,6 +1666,9 @@ impl App {
         });
         if let Some(mut a) = answer {
             let p = self.prompts.pop_front().unwrap();
+            // "T" accepts the certificate for this connection only, so FreeRDP never writes its
+            // own store; RC Manager passes trusted fingerprints itself.
+            let temporary = p.question.contains("Y/T/N");
             if a == "always" {
                 // Accept now and remember the fingerprint in RC Manager's own store.
                 a = "Y";
@@ -1670,6 +1678,9 @@ impl App {
                         Err(e) => self.push(Level::Warn, format!("Cannot remember the certificate: {e:#}")),
                     }
                 }
+            }
+            if a == "Y" && temporary {
+                a = "T";
             }
             let ok = self.sessions.get_mut(&p.session).and_then(|s| s.stdin.as_mut()).map(|stdin| {
                 use std::io::Write;
@@ -2416,5 +2427,18 @@ mod tests {
         assert_eq!(hp, "127.0.0.1:3390");
         assert_eq!(fp, "5630942daa7c67ce9e54ec4812257907d2dd2435c99165249b66baf95f1d5c05");
         assert!(certificate_of(&details[..2]).is_none());
+
+        let changed: Vec<String> = [
+            "!!!Certificate for 127.0.0.1:3390 (RDP-Server) has changed!!!",
+            "New Certificate details:",
+            "	Thumbprint:  f0:06:65:05:b2:1b:ca:ce:ba:b1:9d:72:e7:3d:9b:94:3d:89:18:b2:be:4e:71:16:5e:61:56:f1:04:e2:64:4e",
+            "Old Certificate details:",
+            "	Thumbprint:  7f:0e:34:eb:28:d9:7a:77:89:61:ed:0f:bd:76:f3:27:61:04:02:57:28:ec:05:87:54:b6:e7:c3:e0:45:df:88",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (hp, fp) = certificate_of(&changed).unwrap();
+        assert_eq!(hp, "127.0.0.1:3390");
+        assert!(fp.starts_with("f0066505"));
     }
 }
