@@ -251,7 +251,6 @@ fn now_string() -> String {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, tools: Tools, connect: Vec<String>) -> Self {
-        theme::install_fonts(&cc.egui_ctx);
         let s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
         let (events_tx, events_rx) = channel();
         let (bg_tx, bg_rx) = channel();
@@ -1231,10 +1230,11 @@ impl App {
     fn session_area(&mut self, ui: &mut egui::Ui, id: u64) {
         let rect = ui.available_rect_before_wrap();
         ui.allocate_rect(rect, egui::Sense::hover());
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(if self.s.dark { 16 } else { 32 }));
+        let (bg, _) = theme::session_colors(self.s.dark);
+        ui.painter().rect_filled(rect, 0.0, bg);
         let waiting = self.tabs.iter().find(|t| t.session == id).map(|t| t.adopt.is_some()).unwrap_or(false);
         let text = if waiting { "Waiting for the session window …" } else { "Connecting …" };
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), egui::Color32::from_gray(160));
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), ui.visuals().weak_text_color());
         self.session_rect = Some(rect);
     }
 
@@ -1248,7 +1248,7 @@ impl App {
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 match &mut editor {
                     Editor::Folder(f) => {
-                        ui.heading(RichText::new(format!("🗀 {}", f.name)).color(theme::accent_blue(ui)));
+                        ui.heading(RichText::new(format!("🗀 {}", f.name)).color(theme::accent(ui.visuals().dark_mode)));
                         ui.add_space(8.0);
                         let choices = self.folder_choices(Some(f.id));
                         egui::Grid::new("folder_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -1276,7 +1276,7 @@ impl App {
                     }
                     Editor::Connection(c) => {
                         ui.horizontal(|ui| {
-                            ui.heading(RichText::new(format!("{} {}", c.protocol.icon(), c.name)).color(theme::accent_blue(ui)));
+                            ui.heading(RichText::new(format!("{} {}", c.protocol.icon(), c.name)).color(theme::accent(ui.visuals().dark_mode)));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.add(egui::Button::new(RichText::new("▶ Connect").strong())).clicked() {
                                     actions.push(Action::Connect(c.id));
@@ -2417,7 +2417,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        theme::apply_style(ctx, self.s.dark);
+        theme::apply(ctx, self.s.dark);
         self.init_embedding(frame);
         self.poll_events();
         self.poll_picker();
