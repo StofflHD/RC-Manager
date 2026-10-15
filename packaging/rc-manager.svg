@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 32 32">
+  <!-- A monitor with an active remote session. RC Manager logo; mirrors paint_logo() in src/theme.rs. -->
+  <rect width="32" height="32" rx="7" fill="#1f4e79"/>
+  <rect x="5" y="6.5" width="22" height="15" rx="1.5" fill="#9cc3e6"/>
+  <rect x="7" y="8.5" width="18" height="11" fill="#1f4e79"/>
+  <g fill="#9cc3e6">
+    <rect x="15.1" y="21.5" width="1.8" height="3"/>
+    <rect x="10.5" y="24.5" width="11" height="1.8"/>
+  </g>
+  <circle cx="13" cy="14" r="2.8" fill="#ffffff"/>
+  <rect x="17.5" y="17" width="7" height="7" rx="1.5" fill="#f5a623"/>
+</svg>

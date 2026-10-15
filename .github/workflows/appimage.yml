@@ -1,0 +1,66 @@
+name: AppImage
+
+# Builds the AppImage on every push to main (as a workflow artifact) and
+# publishes it as a release asset for tags like v0.2.0.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install zig and cargo-zigbuild (to target glibc 2.31)
+        run: pip install ziglang==0.16.0 cargo-zigbuild==0.23.4
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Build AppImage
+        run: ZIGBUILD=1 GLIBC=2.31 bash packaging/build-appimage.sh
+
+      - name: Smoke test
+        run: |
+          APP=$(ls dist/RC-Manager-*-x86_64.AppImage)
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          "$APP" --help
+          DATA=$(mktemp -d)
+          "$APP" --data-dir "$DATA" --import tests/fixtures/legacy.db3
+          "$APP" --data-dir "$DATA" --list | tee list.txt
+          grep -q "DC01" list.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RC-Manager-AppImage
+          path: dist/RC-Manager-*-x86_64.AppImage
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" dist/RC-Manager-*-x86_64.AppImage \
+            --title "RC Manager $VERSION" \
+            --prerelease \
+            --notes "RC Manager $VERSION for Linux (x86_64, glibc ≥ 2.31).
+
+          Download the AppImage, make it executable and start it:
+
+          \`\`\`bash
+          chmod +x RC-Manager-$VERSION-x86_64.AppImage
+          ./RC-Manager-$VERSION-x86_64.AppImage
+          \`\`\`
+
+          Optional clients: freerdp3-x11 (RDP), tigervnc-viewer (VNC), sshpass (SSH passwords). See the README for details."

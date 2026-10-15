@@ -1,0 +1,481 @@
+//! Import from `SqLiteDatabase.db3` of the Windows RDP-Manager (database version 12).
+
+use super::{crypto, nrbf};
+use crate::model::*;
+use crate::store::Data;
+use anyhow::{bail, Context, Result};
+use rusqlite::types::ValueRef;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use uuid::Uuid;
+
+const TYPE_RDP: &str = "604b598c-a359-4cd0-81fd-96298abb962d";
+const TYPE_PUTTY: &str = "4cb65fa2-506e-4e3f-93e5-ab7a16f79397";
+const TYPE_VNC: &str = "bec8fd2b-680f-446d-9cf9-ded005c41f8e";
+const TYPE_WEB: &str = "8fc21de3-ea31-4125-97f7-e191ba32ee9b";
+const TYPE_EXT: &str = "acc5553a-3334-40ff-ad95-1ae7d4f931a5";
+const CRED_INHERIT: &str = "3338af54-19fb-4875-b752-8b6f035764d6";
+const SETTING_INHERIT: &str = "e338af54-19fb-4875-b752-8b6f035764d6";
+
+pub struct ImportResult {
+    pub data: Data,
+    pub warnings: Vec<String>,
+    pub skipped_deleted: usize,
+}
+
+type Row = HashMap<String, String>;
+
+fn read_table(db: &rusqlite::Connection, table: &str) -> Result<Vec<Row>> {
+    let mut stmt = match db.prepare(&format!("SELECT * FROM {table}")) {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        let mut m = Row::new();
+        for (i, n) in names.iter().enumerate() {
+            let v = match r.get_ref(i)? {
+                ValueRef::Null => continue,
+                ValueRef::Integer(i) => i.to_string(),
+                ValueRef::Real(f) => f.to_string(),
+                ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                ValueRef::Blob(b) => {
+                    // BLOBs (BinVal) are read separately; GUIDs might be stored as binary.
+                    if b.len() == 16 {
+                        Uuid::from_bytes_le(b.try_into().unwrap()).to_string()
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            m.insert(n.to_ascii_lowercase(), v);
+        }
+        out.push(m);
+    }
+    Ok(out)
+}
+
+fn read_blobs(db: &rusqlite::Connection, table: &str) -> HashMap<String, Vec<u8>> {
+    let mut out = HashMap::new();
+    if let Ok(mut stmt) = db.prepare(&format!("SELECT Id, BinVal FROM {table}")) {
+        if let Ok(rows) = stmt.query_map([], |r| {
+            let id = match r.get_ref(0)? {
+                ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                _ => String::new(),
+            };
+            let blob = match r.get_ref(1)? {
+                ValueRef::Blob(b) => b.to_vec(),
+                _ => Vec::new(),
+            };
+            Ok((id, blob))
+        }) {
+            for (id, blob) in rows.flatten() {
+                if let Some(g) = guid(&id) {
+                    out.insert(g, blob);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Normalises a GUID (any case, with or without braces) to lower case.
+fn guid(s: &str) -> Option<String> {
+    Uuid::parse_str(s.trim().trim_start_matches('{').trim_end_matches('}')).ok().map(|u| u.to_string())
+}
+
+fn truthy(s: Option<&String>) -> bool {
+    matches!(s.map(|s| s.to_ascii_lowercase()).as_deref(), Some("1") | Some("true"))
+}
+
+fn get<'a>(r: &'a Row, k: &str) -> &'a str {
+    r.get(k).map(String::as_str).unwrap_or("")
+}
+
+/// Reads the database. `app_password` is only needed if the original had an application password set.
+pub fn import(db_path: &Path, app_password: Option<&str>) -> Result<ImportResult> {
+    // Open a copy so the original file (WAL) is not modified.
+    let tmp = std::env::temp_dir().join(format!("rcm-import-{}", Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp)?;
+    // The copy holds passwords that are only protected by the original's built-in key.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let copy = tmp.join("import.db3");
+    std::fs::copy(db_path, &copy).with_context(|| format!("Cannot read {}", db_path.display()))?;
+    let wal = db_path.with_file_name(format!("{}-wal", db_path.file_name().unwrap_or_default().to_string_lossy()));
+    if wal.exists() {
+        std::fs::copy(&wal, tmp.join("import.db3-wal")).ok();
+    }
+    let result = import_inner(&copy, db_path, app_password);
+    std::fs::remove_dir_all(&tmp).ok();
+    result
+}
+
+fn import_inner(copy: &Path, original: &Path, app_password: Option<&str>) -> Result<ImportResult> {
+    let db = rusqlite::Connection::open(copy)?;
+    let mut warnings = Vec::new();
+
+    let app_settings: HashMap<String, String> =
+        read_table(&db, "AppSettings")?.into_iter().map(|r| (get(&r, "key").to_string(), get(&r, "value").to_string())).collect();
+    if app_settings.is_empty() && read_table(&db, "Connections")?.is_empty() {
+        bail!("Not an RDP-Manager database (tables AppSettings/Connections missing or empty)");
+    }
+
+    let stored_hash = app_settings.get("AppPassword").cloned().unwrap_or_default();
+    if !stored_hash.is_empty() {
+        match app_password {
+            Some(pw) if crypto::md5_upper_hex(pw).eq_ignore_ascii_case(&stored_hash) => {}
+            Some(_) => bail!("The application password is wrong"),
+            None => bail!("This database is protected by an application password – please enter it"),
+        }
+    }
+    let disable_show_pw = std::fs::read_to_string(original.with_file_name("DisableShowPw")).ok();
+    let key_password = crypto::effective_password(app_password.filter(|_| !stored_hash.is_empty()), disable_show_pw.as_deref());
+    let dpapi = app_settings.get("EncryptionType").map(|s| s.eq_ignore_ascii_case("WindowsUserEncryption")).unwrap_or(false);
+    if dpapi {
+        warnings.push("Passwords were stored with Windows user encryption (DPAPI) and cannot be decrypted on Linux. Switch the original to AES before exporting.".into());
+    }
+
+    // --- Folders ---
+    let mut skipped_deleted = 0;
+    let folder_rows = read_table(&db, "Folders")?;
+    let mut folder_parent: HashMap<String, String> = HashMap::new();
+    let mut folders = Vec::new();
+    for r in &folder_rows {
+        let Some(id) = guid(get(r, "id")) else { continue };
+        if truthy(r.get("deleted")) {
+            skipped_deleted += 1;
+            continue;
+        }
+        folder_parent.insert(id.clone(), guid(get(r, "parent")).unwrap_or_default());
+        folders.push((id, r));
+    }
+    let folder_ids: HashSet<String> = folder_parent.keys().cloned().collect();
+    let parent_of = |p: &str| -> Option<Uuid> { guid(p).filter(|g| folder_ids.contains(g)).and_then(|g| Uuid::parse_str(&g).ok()) };
+
+    // --- Credentials ---
+    let mut credentials = Vec::new();
+    let mut cred_type: HashMap<String, String> = HashMap::new();
+    let mut decrypt_failed = 0;
+    for r in read_table(&db, "Credentials")? {
+        let Some(id) = guid(get(&r, "id")) else { continue };
+        let enc = get(&r, "password");
+        let password = if enc.is_empty() || dpapi {
+            String::new()
+        } else {
+            crypto::decrypt_aes_string(enc, &key_password).unwrap_or_else(|_| {
+                decrypt_failed += 1;
+                String::new()
+            })
+        };
+        cred_type.insert(id.clone(), guid(get(&r, "type")).unwrap_or_default());
+        let name = get(&r, "name");
+        credentials.push(Credential {
+            id: Uuid::parse_str(&id)?,
+            name: if name.is_empty() || guid(name).is_some() { get(&r, "username").to_string() } else { name.to_string() },
+            username: get(&r, "username").to_string(),
+            domain: get(&r, "domain").to_string(),
+            password,
+        });
+    }
+    if decrypt_failed > 0 {
+        warnings.push(format!("{decrypt_failed} password(s) could not be decrypted (DisableShowPw file or application password missing?)."));
+    }
+    let cred_ids: HashSet<String> = cred_type.keys().cloned().collect();
+
+    // Folder → credentials / settings per protocol type
+    let mut folder_creds: HashMap<String, Vec<String>> = HashMap::new();
+    for r in read_table(&db, "FolderCredential")? {
+        if let (Some(f), Some(c)) = (guid(get(&r, "folderid")), guid(get(&r, "credentialid"))) {
+            folder_creds.entry(f).or_default().push(c);
+        }
+    }
+    let setting_rows = read_table(&db, "Settings")?;
+    let setting_type: HashMap<String, String> =
+        setting_rows.iter().filter_map(|r| Some((guid(get(r, "id"))?, guid(get(r, "type")).unwrap_or_default()))).collect();
+    let setting_blobs = read_blobs(&db, "Settings");
+    let mut folder_settings: HashMap<String, Vec<String>> = HashMap::new();
+    for r in read_table(&db, "FolderSetting")? {
+        if let (Some(f), Some(s)) = (guid(get(&r, "folderid")), guid(get(&r, "settingid"))) {
+            folder_settings.entry(f).or_default().push(s);
+        }
+    }
+
+    // Inheritance like GuiManager.GetConnectionCredentials/-Settings: up the folder chain,
+    // the first entry with a matching protocol type wins.
+    let inherited = |start: &str, links: &HashMap<String, Vec<String>>, types: &HashMap<String, String>, ty: &str| -> Option<String> {
+        let mut cur = start.to_string();
+        for _ in 0..256 {
+            if let Some(found) = links.get(&cur).and_then(|ids| ids.iter().find(|id| types.get(*id).map(String::as_str) == Some(ty))) {
+                return Some(found.clone());
+            }
+            let parent = folder_parent.get(&cur)?;
+            if parent == &cur {
+                return None;
+            }
+            cur = parent.clone();
+        }
+        None
+    };
+
+    let out_folders: Vec<Folder> = folders
+        .iter()
+        .map(|(id, r)| {
+            // For the simplified inheritance the folder preferably gets the RDP credentials.
+            let creds = folder_creds.get(id).cloned().unwrap_or_default();
+            let pick = creds
+                .iter()
+                .find(|c| cred_type.get(*c).map(String::as_str) == Some(TYPE_RDP))
+                .or_else(|| creds.first())
+                .filter(|c| cred_ids.contains(*c));
+            Folder {
+                id: Uuid::parse_str(id).unwrap(),
+                parent: parent_of(get(r, "parent")),
+                name: get(r, "name").to_string(),
+                description: get(r, "description").to_string(),
+                sorting: get(r, "sorting").parse().unwrap_or(0),
+                expanded: truthy(r.get("expandet")),
+                credential: pick.and_then(|c| Uuid::parse_str(c).ok()),
+            }
+        })
+        .collect();
+    let folder_cred_simple: HashMap<String, Option<Uuid>> = out_folders.iter().map(|f| (f.id.to_string(), f.credential)).collect();
+    let simple_inherited = |start: &str| -> Option<Uuid> {
+        let mut cur = start.to_string();
+        for _ in 0..256 {
+            if let Some(Some(c)) = folder_cred_simple.get(&cur) {
+                return Some(*c);
+            }
+            cur = folder_parent.get(&cur)?.clone();
+        }
+        None
+    };
+
+    // --- Connections ---
+    let mut connections = Vec::new();
+    let mut unknown_types = 0;
+    for r in read_table(&db, "Connections")? {
+        let Some(id) = guid(get(&r, "id")) else { continue };
+        if truthy(r.get("deleted")) {
+            skipped_deleted += 1;
+            continue;
+        }
+        let ty = guid(get(&r, "type")).unwrap_or_default();
+        let (protocol, mut port) = match ty.as_str() {
+            TYPE_RDP => (Protocol::Rdp, 0u16),
+            TYPE_PUTTY => (Protocol::Ssh, 0),
+            TYPE_VNC => (Protocol::Vnc, 0),
+            TYPE_WEB => (Protocol::Web, 0),
+            TYPE_EXT => (Protocol::External, 0),
+            _ => {
+                unknown_types += 1;
+                continue;
+            }
+        };
+        let parent_raw = guid(get(&r, "parent")).unwrap_or_default();
+        let mut conn = Connection::new(get(&r, "name"), protocol, parent_of(&parent_raw));
+        conn.id = Uuid::parse_str(&id)?;
+        conn.sorting = get(&r, "sorting").parse().unwrap_or(0);
+        conn.mac = get(&r, "mac").to_string();
+        conn.last_connected = r.get("lastconnection").cloned();
+        conn.description = [get(&r, "description"), get(&r, "descriptionex")].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n\n");
+
+        let target = get(&r, "target").trim().to_string();
+        if protocol == Protocol::Web {
+            conn.host = target;
+        } else if let Some((h, p)) = target.rsplit_once(':').filter(|(h, p)| !h.contains(':') && p.parse::<u16>().is_ok()) {
+            conn.host = h.to_string();
+            port = p.parse().unwrap();
+        } else {
+            conn.host = target;
+        }
+
+        // Credentials
+        let cred = guid(get(&r, "credential")).unwrap_or_default();
+        let effective = if cred.is_empty() || cred == CRED_INHERIT || cred == Uuid::nil().to_string() {
+            inherited(&parent_raw, &folder_creds, &cred_type, &ty)
+        } else if cred_ids.contains(&cred) {
+            Some(cred)
+        } else {
+            None
+        };
+        conn.credential = match effective.and_then(|c| Uuid::parse_str(&c).ok()) {
+            None => CredentialRef::None,
+            Some(c) if conn.parent.is_some() && simple_inherited(&parent_raw) == Some(c) => CredentialRef::Inherit,
+            Some(c) => CredentialRef::Id(c),
+        };
+
+        // Settings
+        let setting = guid(get(&r, "setting")).unwrap_or_default();
+        let setting = if setting.is_empty() || setting == SETTING_INHERIT || setting == Uuid::nil().to_string() {
+            inherited(&parent_raw, &folder_settings, &setting_type, &ty)
+        } else {
+            Some(setting)
+        };
+        if let Some(blob) = setting.and_then(|s| setting_blobs.get(&s)).filter(|b| !b.is_empty()) {
+            match nrbf::parse(blob) {
+                Ok(g) => {
+                    if let Some(f) = g.root_fields() {
+                        apply_settings(&mut conn, &f, &mut port);
+                    }
+                }
+                Err(e) => warnings.push(format!("Settings of \"{}\" are unreadable: {e}", conn.name)),
+            }
+        }
+        conn.port = if port == conn.protocol.default_port() { 0 } else { port };
+        connections.push(conn);
+    }
+    // Command lines come from the imported file and are executed on connect: point them out.
+    let custom: Vec<&str> = connections
+        .iter()
+        .filter(|c| !c.options.ssh.extra_args.trim().is_empty() || !c.options.external.command.trim().is_empty())
+        .map(|c| c.name.as_str())
+        .collect();
+    if !custom.is_empty() {
+        warnings.push(format!(
+            "{} imported connection(s) run custom command lines – review them before connecting: {}",
+            custom.len(),
+            custom.join(", ")
+        ));
+    }
+    if unknown_types > 0 {
+        warnings.push(format!("{unknown_types} connection(s) of unknown type (plugins) skipped."));
+    }
+
+    Ok(ImportResult { data: Data { folders: out_folders, connections, credentials }, warnings, skipped_deleted })
+}
+
+fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16) {
+    match conn.protocol {
+        Protocol::Rdp => {
+            if let Some(p) = f.int(&["RdpPort", "_rdpPort"]).filter(|p| (1..=65535).contains(p)) {
+                *port = p as u16;
+            }
+            let o = &mut conn.options.rdp;
+            o.window_mode = match f.int(&["WindowType"]) {
+                Some(2) | Some(4) => WindowMode::Fullscreen,
+                Some(3) => WindowMode::MultiMonitor,
+                _ => WindowMode::Window,
+            };
+            if let Some(res) = f.string(&["WindowResolution"]).filter(|r| r.contains('x')) {
+                o.resolution = res.replace(' ', "");
+                o.dynamic_resolution = false;
+            }
+            if let Some(cd) = f.int(&["ColorDepth"]).filter(|c| [8, 15, 16, 24, 32].contains(c)) {
+                o.color_depth = cd as u8;
+            }
+            o.clipboard = f.bool(&["Clipboard"]).unwrap_or(true);
+            o.printers = f.bool(&["Printer"]).unwrap_or(false);
+            o.smartcards = f.bool(&["Smartcards"]).unwrap_or(false);
+            o.console = f.bool(&["Console"]).unwrap_or(false);
+            o.microphone = f.bool(&["RemoteAudioCapture"]).unwrap_or(false);
+            // RdpSoundMode: 0 = play locally, 1 = remote, 2 = not at all
+            o.sound = f.int(&["Sound"]).map(|s| s == 0).unwrap_or(true);
+            o.home_drive = !f.strings(&["LocalDrives"]).is_empty();
+            o.gateway = f.string(&["GwServer"]).unwrap_or_default();
+            o.gateway_user = f.string(&["GwUser"]).unwrap_or_default();
+            o.gateway_domain = f.string(&["GwDomain"]).unwrap_or_default();
+            o.keyboard_layout = f.string(&["KeyboardLayout"]).unwrap_or_default();
+            if f.bool(&["RunAppOnConnect"]).unwrap_or(false) {
+                o.remote_app = f.string(&["RunAppOnConnectPath"]).unwrap_or_default();
+            }
+        }
+        Protocol::Ssh => {
+            if let Some(p) = f.int(&["Port"]).filter(|p| (1..=65535).contains(p)) {
+                *port = p as u16;
+            }
+            // PuttyProtocols: 0 = SSH, 1 = Telnet
+            if f.int(&["Protocol"]) == Some(1) {
+                conn.protocol = Protocol::Telnet;
+            }
+            conn.options.ssh.compression = f.bool(&["SshCompression"]).unwrap_or(false);
+            if f.bool(&["UseOwnCmd"]).unwrap_or(false) {
+                conn.options.ssh.extra_args = f.string(&["CommandLine"]).unwrap_or_default();
+            }
+        }
+        Protocol::Vnc => {
+            if let Some(p) = f.int(&["Port"]).filter(|p| (1..=65535).contains(p)) {
+                *port = p as u16;
+            }
+            conn.options.vnc.view_only = f.bool(&["ViewOnly"]).unwrap_or(false);
+            conn.options.vnc.shared = f.bool(&["Shared"]).unwrap_or(false);
+        }
+        Protocol::External => {
+            let file = f.string(&["ProcessFile"]).unwrap_or_default();
+            let args = f.string(&["Args"]).unwrap_or_default();
+            conn.options.external.command = format!("{file} {args}").trim().to_string();
+            conn.options.external.working_dir = f.string(&["WorkingDir"]).unwrap_or_default();
+        }
+        Protocol::Telnet | Protocol::Web => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(s: &str) -> Uuid {
+        Uuid::parse_str(s).unwrap()
+    }
+
+    // Fixture with the original schema (DB version 12); passwords and settings blobs
+    // were generated with .NET (see crypto.rs / nrbf.rs).
+    #[test]
+    fn imports_original_database() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy.db3");
+        let r = import(&path, None).unwrap();
+        let d = &r.data;
+        assert_eq!(r.skipped_deleted, 2);
+        assert!(r.warnings.iter().any(|w| w.contains("unknown type")), "{:?}", r.warnings);
+        assert!(r.warnings.iter().any(|w| w.contains("custom command lines") && w.contains("Linux-Box")), "{:?}", r.warnings);
+
+        assert_eq!(d.folders.len(), 2);
+        let fa = d.folders.iter().find(|f| f.name == "Kunde A").unwrap();
+        let fb = d.folders.iter().find(|f| f.name == "Server").unwrap();
+        assert_eq!(fa.parent, None);
+        assert!(fa.expanded);
+        assert_eq!(fa.credential, Some(id("cccccccc-0000-0000-0000-000000000001")));
+        assert_eq!(fb.parent, Some(fa.id));
+
+        let admin = d.credentials.iter().find(|c| c.username == "administrator").unwrap();
+        assert_eq!(admin.name, "Domänen-Admin");
+        assert_eq!(admin.domain, "FIRMA");
+        assert_eq!(admin.password, "Geheim123!");
+        assert_eq!(d.credentials.iter().find(|c| c.username == "root").unwrap().password, "äöü ß €");
+
+        assert_eq!(d.connections.len(), 3);
+        let dc = d.connections.iter().find(|c| c.name == "DC01").unwrap();
+        assert_eq!(dc.protocol, Protocol::Rdp);
+        assert_eq!(dc.parent, Some(fb.id));
+        assert_eq!(dc.host, "dc01.firma.local");
+        assert_eq!(dc.port, 3390, "port from settings inherited from the folder");
+        assert_eq!(dc.options.rdp.resolution, "1920x1080");
+        assert_eq!(dc.options.rdp.color_depth, 24);
+        assert!(dc.options.rdp.clipboard);
+        assert_eq!(dc.credential, CredentialRef::Inherit);
+        assert_eq!(dc.mac, "00:11:22:33:44:55");
+
+        let ssh = d.connections.iter().find(|c| c.name == "Linux-Box").unwrap();
+        assert_eq!(ssh.protocol, Protocol::Ssh);
+        assert_eq!(ssh.port, 2222);
+        assert_eq!(ssh.options.ssh.extra_args, "-X");
+        assert_eq!(ssh.credential, CredentialRef::Id(id("cccccccc-0000-0000-0000-000000000002")));
+
+        let web = d.connections.iter().find(|c| c.name == "Intranet").unwrap();
+        assert_eq!(web.protocol, Protocol::Web);
+        assert_eq!(web.host, "https://intranet.firma.local");
+        assert_eq!(web.parent, None);
+        assert_eq!(web.credential, CredentialRef::None);
+    }
+
+    #[test]
+    fn rejects_non_database() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rdpsettings.bin");
+        assert!(import(&path, None).is_err());
+    }
+}

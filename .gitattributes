@@ -1,0 +1,8 @@
+*.sh text eol=lf
+packaging/AppRun text eol=lf
+*.rs text eol=lf
+*.yml text eol=lf
+*.db3 binary
+*.bin binary
+*.png binary
+*.ttf binary

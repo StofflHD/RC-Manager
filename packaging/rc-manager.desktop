@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=RC Manager
+GenericName=Remote Connection Manager
+Comment=Connection manager for RDP, SSH, VNC, web and external programs
+Exec=rc-manager
+Icon=rc-manager
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=RDP;SSH;VNC;Remote;Desktop;Connection;
+StartupWMClass=rc-manager

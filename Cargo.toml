@@ -1,0 +1,43 @@
+[package]
+name = "rc-manager"
+version = "0.2.0"
+edition = "2021"
+description = "RC Manager – remote connection manager for RDP, SSH, VNC, web and external programs – Linux re-implementation of the Windows RDP-Manager"
+authors = ["© StofflHD and Claude"]
+license = "MIT"
+
+[dependencies]
+# Pinned: the egui API changes between releases (same versions as the IP Calculator).
+eframe = { version = "=0.29.1", features = ["persistence"] }
+egui = "=0.29.1"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+uuid = { version = "1.10.0", features = ["v4", "serde"] }
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+anyhow = "1.0.89"
+dirs = "5.0.1"
+shell-words = "1.1.0"
+# Native file dialogs; on Linux via the XDG desktop portal (pure Rust, falls back to zenity).
+rfd = "=0.15.1"
+
+# Encryption of stored credentials
+chacha20poly1305 = "0.10.1"
+argon2 = "0.5.3"
+rand = "0.8.5"
+
+# Import of the Windows database (AES-CBC + PasswordDeriveBytes/SHA-1, MD5 for the app password)
+aes = "0.8.4"
+cbc = { version = "0.1.2", features = ["alloc"] }
+sha1 = "0.10.6"
+md-5 = "0.10.6"
+base64 = "0.22.1"
+
+# VNC password file (fixed-key DES format of vncpasswd)
+des = "0.8.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
