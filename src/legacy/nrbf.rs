@@ -384,6 +384,19 @@ impl Fields<'_> {
         names.iter().find_map(|n| self.map.get(*n)).map(|v| self.graph.resolve(v))
     }
 
+    /// Fields of an object referenced by a field (e.g. a list class with extra properties).
+    pub fn nested(&self, names: &[&str]) -> Option<Fields<'_>> {
+        let Value::Ref(id) = self.get(names)? else { return None };
+        match self.graph.objects.get(id)? {
+            Obj::Class { name, members } => Some(Fields {
+                graph: self.graph,
+                class_name: name.clone(),
+                map: members.iter().map(|(k, v)| (clean_name(k).to_string(), v)).collect(),
+            }),
+            _ => None,
+        }
+    }
+
     pub fn int(&self, names: &[&str]) -> Option<i64> {
         match self.get(names)? {
             Value::Int(i) => Some(*i),

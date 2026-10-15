@@ -338,7 +338,7 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
             match nrbf::parse(blob) {
                 Ok(g) => {
                     if let Some(f) = g.root_fields() {
-                        apply_settings(&mut conn, &f, &mut port);
+                        apply_settings(&mut conn, &f, &mut port, &mut warnings);
                     }
                 }
                 Err(e) => warnings.push(format!("Settings of \"{}\" are unreadable: {e}", conn.name)),
@@ -367,21 +367,113 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
     Ok(ImportResult { data: Data { folders: out_folders, connections, credentials }, warnings, skipped_deleted, backup: None })
 }
 
-fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16) {
+/// Splits a Windows command line: whitespace separates, double quotes group, backslashes
+/// are ordinary characters (paths like `C:\keys\id.ppk`).
+fn split_windows_cmdline(cmd: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let (mut quoted, mut any) = (false, false);
+    for c in cmd.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                any = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if any {
+                    words.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                any = true;
+            }
+        }
+    }
+    if any {
+        words.push(cur);
+    }
+    words
+}
+
+/// OpenSSH equivalent of a PuTTY command line (the original's "own command line").
+#[derive(Debug, Default, PartialEq)]
+struct PuttyCmd {
+    args: Vec<String>,
+    port: Option<u16>,
+    telnet: bool,
+    x11: bool,
+    compression: bool,
+    /// Options without an OpenSSH equivalent.
+    dropped: Vec<String>,
+}
+
+fn translate_putty(cmd: &str) -> PuttyCmd {
+    let words = split_windows_cmdline(cmd);
+    let mut out = PuttyCmd::default();
+    let mut it = words.into_iter();
+    while let Some(w) = it.next() {
+        match w.as_str() {
+            "-P" => out.port = it.next().and_then(|p| p.parse().ok()).filter(|p| *p > 0),
+            // Credentials come from the connection's credentials, never from the command line.
+            "-l" | "-pw" | "-pwfile" => {
+                it.next();
+            }
+            "-ssh" | "-2" | "-batch" => {}
+            "-telnet" => out.telnet = true,
+            "-X" => out.x11 = true,
+            "-C" => out.compression = true,
+            "-A" | "-a" | "-4" | "-6" | "-v" | "-N" | "-T" | "-t" | "-x" | "-Y" => out.args.push(w),
+            "-L" | "-R" | "-D" => {
+                if let Some(v) = it.next() {
+                    out.args.push(w);
+                    out.args.push(v);
+                }
+            }
+            "-i" => match it.next() {
+                Some(k) if !k.to_ascii_lowercase().ends_with(".ppk") && !k.contains('\\') => {
+                    out.args.push(w);
+                    out.args.push(k);
+                }
+                Some(k) => out.dropped.push(format!("-i {k}")),
+                None => {}
+            },
+            "-load" | "-m" | "-sercfg" | "-hostkey" | "-proxycmd" => out.dropped.push(format!("{w} {}", it.next().unwrap_or_default())),
+            other if other.starts_with('-') => out.dropped.push(w),
+            // A host or user@host: the connection's host is used.
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The original's external-program placeholders (`ExtAppView.ParseArgs`) in RC Manager's syntax.
+fn translate_ext_placeholders(args: &str) -> String {
+    args.replace("%target%", "{T}").replace("%hostname%", "{T}").replace("%name%", "{N}").replace("%username%", "{U}").replace("%password%", "{P}")
+}
+
+fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warnings: &mut Vec<String>) {
     match conn.protocol {
         Protocol::Rdp => {
             if let Some(p) = f.int(&["RdpPort", "_rdpPort"]).filter(|p| (1..=65535).contains(p)) {
                 *port = p as u16;
             }
             let o = &mut conn.options.rdp;
-            o.window_mode = match f.int(&["WindowType"]) {
-                Some(2) | Some(4) => WindowMode::Fullscreen,
-                Some(3) => WindowMode::MultiMonitor,
+            // RdpWindowStartType: 0 tabbed (fits the tab), 1 window and 5 tabbed with a fixed
+            // resolution, 2/4 full screen, 3 all monitors. The original only uses
+            // WindowResolution for 1 and 5; its setter forces 800x600 for every connection.
+            let window_type = f.int(&["WindowType"]).unwrap_or(0);
+            o.window_mode = match window_type {
+                2 | 4 => WindowMode::Fullscreen,
+                3 => WindowMode::MultiMonitor,
                 _ => WindowMode::Window,
             };
-            if let Some(res) = f.string(&["WindowResolution"]).filter(|r| r.contains('x')) {
-                o.resolution = res.replace(' ', "");
-                o.dynamic_resolution = false;
+            if matches!(window_type, 1 | 5) {
+                if let Some(res) = f.string(&["WindowResolution"]).and_then(|r| crate::launch::parse_resolution(&r)) {
+                    o.resolution = format!("{}x{}", res.0, res.1);
+                    o.dynamic_resolution = false;
+                }
             }
             if let Some(cd) = f.int(&["ColorDepth"]).filter(|c| [8, 15, 16, 24, 32].contains(c)) {
                 o.color_depth = cd as u8;
@@ -393,11 +485,21 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16) {
             o.microphone = f.bool(&["RemoteAudioCapture"]).unwrap_or(false);
             // RdpSoundMode: 0 = play locally, 1 = remote, 2 = not at all
             o.sound = f.int(&["Sound"]).map(|s| s == 0).unwrap_or(true);
-            o.home_drive = !f.strings(&["LocalDrives"]).is_empty();
-            o.gateway = f.string(&["GwServer"]).unwrap_or_default();
-            o.gateway_user = f.string(&["GwUser"]).unwrap_or_default();
-            o.gateway_domain = f.string(&["GwDomain"]).unwrap_or_default();
-            o.keyboard_layout = f.string(&["KeyboardLayout"]).unwrap_or_default();
+            // RdpDriveList: a list of drive letters plus an "all drives" flag. Windows drive
+            // letters have no meaning here, so any shared drive becomes the home folder.
+            let all_drives = f.nested(&["LocalDrives"]).and_then(|d| d.bool(&["AllDrives"])).unwrap_or(false);
+            o.home_drive = all_drives || !f.strings(&["LocalDrives"]).is_empty();
+            // RdpGatewayType: 0 = TSC_PROXY_MODE_NONE_DIRECT (no gateway), 4 = no gateway with
+            // local bypass; 1, 2 and 3 use the gateway. The server field may be filled anyway.
+            if matches!(f.int(&["GwType"]), Some(1..=3)) {
+                o.gateway = f.string(&["GwServer"]).unwrap_or_default();
+                if f.bool(&["UseOwnGwCreds"]).unwrap_or(false) {
+                    o.gateway_user = f.string(&["GwUser"]).unwrap_or_default();
+                    o.gateway_domain = f.string(&["GwDomain"]).unwrap_or_default();
+                }
+            }
+            // "00000000" means "no preselection" in the original (its default).
+            o.keyboard_layout = f.string(&["KeyboardLayout"]).filter(|k| crate::launch::keyboard_layout_id(k).is_some()).unwrap_or_default();
             if f.bool(&["RunAppOnConnect"]).unwrap_or(false) {
                 o.remote_app = f.string(&["RunAppOnConnectPath"]).unwrap_or_default();
             }
@@ -412,7 +514,20 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16) {
             }
             conn.options.ssh.compression = f.bool(&["SshCompression"]).unwrap_or(false);
             if f.bool(&["UseOwnCmd"]).unwrap_or(false) {
-                conn.options.ssh.extra_args = f.string(&["CommandLine"]).unwrap_or_default();
+                // The own command line replaces all other options in the original (PuttyView).
+                let cmd = translate_putty(&f.string(&["CommandLine"]).unwrap_or_default());
+                *port = cmd.port.unwrap_or(0);
+                if cmd.telnet {
+                    conn.protocol = Protocol::Telnet;
+                }
+                conn.options.ssh.x11_forwarding = cmd.x11;
+                conn.options.ssh.compression = cmd.compression;
+                conn.options.ssh.extra_args = shell_words::join(&cmd.args);
+                if !cmd.dropped.is_empty() {
+                    warnings.push(format!("PuTTY options of \"{}\" without OpenSSH equivalent were left out: {}", conn.name, cmd.dropped.join(", ")));
+                }
+            } else if let Some(profile) = f.string(&["ProfileName"]).filter(|p| !matches!(p.as_str(), "Default Settings" | "Nicht verwenden" | "Do not use")) {
+                warnings.push(format!("\"{}\" used the PuTTY session \"{profile}\"; its settings are not available on Linux", conn.name));
             }
         }
         Protocol::Vnc => {
@@ -424,7 +539,7 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16) {
         }
         Protocol::External => {
             let file = f.string(&["ProcessFile"]).unwrap_or_default();
-            let args = f.string(&["Args"]).unwrap_or_default();
+            let args = translate_ext_placeholders(&f.string(&["Args"]).unwrap_or_default());
             conn.options.external.command = format!("{file} {args}").trim().to_string();
             conn.options.external.working_dir = f.string(&["WorkingDir"]).unwrap_or_default();
         }
@@ -449,7 +564,8 @@ mod tests {
         let d = &r.data;
         assert_eq!(r.skipped_deleted, 2);
         assert!(r.warnings.iter().any(|w| w.contains("unknown type")), "{:?}", r.warnings);
-        assert!(r.warnings.iter().any(|w| w.contains("custom command lines") && w.contains("Linux-Box")), "{:?}", r.warnings);
+        // Linux-Box's own PuTTY command line "-X" becomes X11 forwarding, nothing custom remains.
+        assert!(!r.warnings.iter().any(|w| w.contains("custom command lines")), "{:?}", r.warnings);
 
         assert_eq!(d.folders.len(), 2);
         let fa = d.folders.iter().find(|f| f.name == "Kunde A").unwrap();
@@ -479,8 +595,10 @@ mod tests {
 
         let ssh = d.connections.iter().find(|c| c.name == "Linux-Box").unwrap();
         assert_eq!(ssh.protocol, Protocol::Ssh);
-        assert_eq!(ssh.port, 2222);
-        assert_eq!(ssh.options.ssh.extra_args, "-X");
+        // With an own command line the original ignores the port setting; PuTTY then uses 22.
+        assert_eq!(ssh.port, 0);
+        assert!(ssh.options.ssh.x11_forwarding);
+        assert_eq!(ssh.options.ssh.extra_args, "");
         assert_eq!(ssh.credential, CredentialRef::Id(id("cccccccc-0000-0000-0000-000000000002")));
 
         let web = d.connections.iter().find(|c| c.name == "Intranet").unwrap();
@@ -506,6 +624,38 @@ mod tests {
         assert_eq!(r.data.connections.len(), 3);
         assert_eq!(r.data.credentials.iter().find(|c| c.username == "administrator").unwrap().password, "Geheim123!");
         assert_eq!(r.backup.unwrap().version, "4.9.9.3");
+    }
+
+    // Settings blob of a connection with the original's default values (generated with .NET).
+    #[test]
+    fn original_defaults_are_not_passed_on() {
+        let g = nrbf::parse(include_bytes!("../../tests/fixtures/rdpsettings_defaults.bin")).unwrap();
+        let f = g.root_fields().unwrap();
+        let mut c = Connection::new("x", Protocol::Rdp, None);
+        let mut port = 0;
+        apply_settings(&mut c, &f, &mut port, &mut Vec::new());
+        let o = &c.options.rdp;
+        assert_eq!(o.keyboard_layout, "", "00000000 = no preselection");
+        assert_eq!(o.window_mode, WindowMode::Window);
+        assert_eq!(o.resolution, "", "tabbed connections fit the window");
+        assert!(o.dynamic_resolution);
+        assert_eq!(o.gateway, "", "gateway type 0 = no gateway");
+        assert_eq!(o.gateway_user, "");
+        assert!(o.home_drive, "AllDrives");
+        assert_eq!(o.color_depth, 32);
+        assert_eq!(port, 0, "port 0 keeps the default");
+    }
+
+    #[test]
+    fn putty_command_lines_become_openssh_options() {
+        let c = translate_putty(r#"-ssh -P 2222 -X -C -l root -pw geheim -L 8080:localhost:80 -load "Mein Profil" -i C:\keys\id.ppk user@host"#);
+        assert_eq!(c.port, Some(2222));
+        assert!(c.x11 && c.compression && !c.telnet);
+        assert_eq!(c.args, ["-L", "8080:localhost:80"]);
+        assert_eq!(c.dropped, ["-load Mein Profil", r"-i C:\keys\id.ppk"]);
+        assert!(!format!("{c:?}").contains("geheim"), "password must not survive");
+        assert!(translate_putty("-telnet").telnet);
+        assert_eq!(translate_ext_placeholders("mstsc /v:%target% /u:%username%"), "mstsc /v:{T} /u:{U}");
     }
 
     #[test]

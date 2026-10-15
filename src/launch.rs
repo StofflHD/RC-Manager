@@ -173,6 +173,20 @@ fn redact(args: &[String], secrets: &[&str]) -> String {
         .join(" ")
 }
 
+/// "1920x1080" → (1920, 1080); `None` for anything else, including zero sizes.
+pub fn parse_resolution(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.trim().split_once(['x', 'X'])?;
+    let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Windows keyboard layout ID ("00000407", "0x00000407"); `None` for empty, invalid or
+/// "00000000", which the original uses for "no preselection".
+pub fn keyboard_layout_id(s: &str) -> Option<u32> {
+    let hex = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+    u32::from_str_radix(hex, 16).ok().filter(|v| *v != 0)
+}
+
 fn split_extra(s: &str) -> Result<Vec<String>> {
     shell_words::split(s).map_err(|e| anyhow!("Invalid extra arguments: {e}"))
 }
@@ -250,7 +264,7 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Resu
     }
     match o.window_mode {
         WindowMode::Window => {
-            if let Some((w, h)) = o.resolution.split_once('x').filter(|(w, h)| w.parse::<u32>().is_ok() && h.parse::<u32>().is_ok()) {
+            if let Some((w, h)) = parse_resolution(&o.resolution) {
                 a.push(format!("/size:{w}x{h}"));
             }
         }
@@ -327,10 +341,8 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools) -> Resu
             }
         }
     }
-    if !o.keyboard_layout.trim().is_empty() {
-        let k = o.keyboard_layout.trim();
-        let k = if k.starts_with("0x") { k.to_string() } else { format!("0x{k}") };
-        a.push(if v3 { format!("/kbd:layout:{k}") } else { format!("/kbd:{k}") });
+    if let Some(id) = keyboard_layout_id(&o.keyboard_layout) {
+        a.push(if v3 { format!("/kbd:layout:0x{id:08X}") } else { format!("/kbd:0x{id:08X}") });
     }
     if !o.remote_app.trim().is_empty() {
         a.push(if v3 { format!("/app:program:{}", o.remote_app.trim()) } else { format!("/app:{}", o.remote_app.trim()) });
@@ -714,6 +726,26 @@ mod tests {
         let mut c = Connection::new("W", Protocol::Web, None);
         c.host = "http://intranet/app?x=1".into();
         assert!(plan(&c, None, &tools(3)).is_ok());
+    }
+
+    #[test]
+    fn no_keyboard_or_size_for_placeholders() {
+        let mut c = Connection::new("Srv", Protocol::Rdp, None);
+        c.host = "srv".into();
+        c.options.rdp.dynamic_resolution = false;
+        for (kbd, res) in [("00000000", "0x0"), ("", ""), ("zz", "800x"), ("0x0", "x600")] {
+            c.options.rdp.keyboard_layout = kbd.into();
+            c.options.rdp.resolution = res.into();
+            let p = plan(&c, None, &tools(2)).unwrap();
+            assert!(!p.args.iter().any(|a| a.starts_with("/kbd") || a.starts_with("/size")), "{kbd:?} {res:?}: {:?}", p.args);
+        }
+        c.options.rdp.keyboard_layout = "00000407".into();
+        c.options.rdp.resolution = "1280X720".into();
+        let p = plan(&c, None, &tools(2)).unwrap();
+        assert!(p.args.contains(&"/kbd:0x00000407".to_string()));
+        assert!(p.args.contains(&"/size:1280x720".to_string()));
+        let p = plan(&c, None, &tools(3)).unwrap();
+        assert!(p.stdin.unwrap().lines().any(|l| l == "/kbd:layout:0x00000407"));
     }
 
     #[test]
