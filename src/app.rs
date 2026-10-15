@@ -305,6 +305,13 @@ impl App {
         if app.tools.freerdp.is_none() {
             app.push(Level::Warn, "FreeRDP not found – RDP connections need it installed (Options → External Programs).");
         }
+        let missing = launch::bundle_problems();
+        if !missing.is_empty() {
+            app.push(
+                Level::Warn,
+                format!("The bundled clients cannot start: this system lacks {} (Options → External Programs).", missing.join(", ")),
+            );
+        }
         app
     }
 

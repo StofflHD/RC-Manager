@@ -64,12 +64,37 @@ fn loader_failed(text: &str) -> bool {
     text.contains("error while loading shared libraries") || (text.contains("version `GLIBC") && text.contains("not found"))
 }
 
+/// "libX11.so.6" from "…: error while loading shared libraries: libX11.so.6: cannot open …".
+fn missing_library(text: &str) -> Option<String> {
+    let rest = text.split("error while loading shared libraries: ").nth(1)?;
+    Some(rest.split(':').next()?.trim().to_string()).filter(|l| !l.is_empty())
+}
+
+/// Why bundled clients cannot start here (system libraries the AppImage expects from the
+/// desktop, e.g. libX11 on a minimal WSL install), shown with the external programs.
+static BUNDLE_PROBLEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Runs a program once (e.g. with `--version`) and returns its output, or `None` if it
 /// cannot be started on this system.
 fn probe(path: &str, arg: &str) -> Option<String> {
     let out = Command::new(path).arg(arg).stdin(Stdio::null()).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    (!loader_failed(&text)).then_some(text)
+    if !loader_failed(&text) {
+        return Some(text);
+    }
+    if is_bundled(path) {
+        let why = missing_library(&text).unwrap_or_else(|| "a newer glibc".into());
+        let mut list = BUNDLE_PROBLEMS.lock().unwrap_or_else(|e| e.into_inner());
+        if !list.contains(&why) {
+            list.push(why);
+        }
+    }
+    None
+}
+
+/// Missing system libraries that keep bundled clients from starting (empty if all run).
+pub fn bundle_problems() -> Vec<String> {
+    BUNDLE_PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 fn freerdp_at(path: String, name: &str) -> Option<(String, u32)> {
@@ -89,6 +114,7 @@ pub fn is_bundled(path: &str) -> bool {
 
 impl Tools {
     pub fn detect() -> Self {
+        BUNDLE_PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // Clients shipped in the AppImage come first, if they run on this system.
         const RDP: [&str; 6] = ["xfreerdp3", "sdl-freerdp3", "xfreerdp", "wlfreerdp3", "wlfreerdp", "sdl-freerdp"];
         let freerdp = RDP
@@ -139,7 +165,7 @@ impl Tools {
     pub fn summary(&self) -> Vec<(&'static str, String)> {
         let label = |p: &str| if is_bundled(p) { format!("bundled with the AppImage ({p})") } else { p.to_string() };
         let show = |o: &Option<String>| o.as_deref().map(label).unwrap_or_else(|| "not found".into());
-        vec![
+        let mut rows = vec![
             (
                 "RDP (FreeRDP)",
                 self.freerdp
@@ -152,7 +178,18 @@ impl Tools {
             ("VNC (TigerVNC)", self.vncviewer.as_deref().map(label).unwrap_or_else(|| "not found – package tigervnc-viewer".into())),
             ("Browser (xdg-open)", show(&self.opener)),
             ("xterm (SSH in tabs)", show(&self.xterm)),
-        ]
+        ];
+        let missing = bundle_problems();
+        if !missing.is_empty() {
+            rows.push((
+                "Bundled clients",
+                format!(
+                    "cannot start, this system lacks {} – install the desktop libraries (e.g. packages freerdp3-x11 tigervnc-viewer xterm)",
+                    missing.join(", ")
+                ),
+            ));
+        }
+        rows
     }
 }
 
@@ -971,6 +1008,10 @@ mod tests {
         assert!(loader_failed("xfreerdp: error while loading shared libraries: libwinpr3.so.3: cannot open shared object file"));
         assert!(loader_failed("/tmp/x/xfreerdp: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.34' not found (required by xfreerdp)"));
         assert!(!loader_failed("This is FreeRDP version 3.32.2 (n/a)"));
+        assert_eq!(
+            missing_library("xterm: error while loading shared libraries: libfontconfig.so.1: cannot open shared object file: No such file or directory").as_deref(),
+            Some("libfontconfig.so.1")
+        );
     }
 
     #[test]
