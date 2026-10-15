@@ -240,7 +240,9 @@ pub fn validate_url(url: &str) -> Result<()> {
 
 const FREERDP_ARGS_ENV: &str = "RC_MANAGER_FREERDP_ARGS";
 
-pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
+/// `cert_fingerprint`: SHA-256 fingerprint (hex) of a certificate the user trusts for this
+/// RDP server; FreeRDP accepts exactly that certificate without asking.
+pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>, cert_fingerprint: Option<&str>) -> Result<Plan> {
     match conn.protocol {
         Protocol::Web => {
             // Without a scheme the text is a host (optionally followed by a path) and gets https://.
@@ -254,7 +256,7 @@ pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
         _ => validate_host(conn.host.trim())?,
     }
     match conn.protocol {
-        Protocol::Rdp => plan_rdp(conn, cred, tools, embed),
+        Protocol::Rdp => plan_rdp(conn, cred, tools, embed, cert_fingerprint),
         Protocol::Ssh | Protocol::Telnet => plan_terminal(conn, cred, tools, embed),
         Protocol::Vnc => plan_vnc(conn, cred, tools, embed),
         Protocol::Web => plan_web(conn, tools),
@@ -262,7 +264,7 @@ pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     }
 }
 
-fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
+fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>, cert_fingerprint: Option<&str>) -> Result<Plan> {
     let (program, v) = tools.freerdp.clone().ok_or_else(|| anyhow!("FreeRDP is not installed (xfreerdp3/xfreerdp)"))?;
     let v3 = v >= 3;
     let o = &conn.options.rdp;
@@ -345,6 +347,10 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     // changed. "tofu" would refuse a changed certificate without asking.
     if o.ignore_certificate {
         a.push(if v3 { "/cert:ignore" } else { "/cert-ignore" }.into());
+    } else if let Some(fp) = cert_fingerprint.filter(|fp| v3 && fp.len() == 64 && fp.chars().all(|c| c.is_ascii_hexdigit())) {
+        // RC Manager keeps trusted certificates itself (FreeRDP 3.32's own store proved
+        // unreliable); a changed certificate does not match and is asked about again.
+        a.push(format!("/cert:fingerprint:sha256:{}", fp.to_ascii_lowercase()));
     }
     if !o.gateway.trim().is_empty() {
         // Gateway logon: its own credentials or those of the connection
@@ -742,7 +748,7 @@ mod tests {
         c.options.rdp.window_mode = WindowMode::Window;
         c.options.rdp.resolution = "1280x720".into();
         c.options.rdp.dynamic_resolution = false;
-        let p = plan(&c, Some(&cred()), &tools(3), None).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
         assert_eq!(p.args, vec!["/args-from:env:RC_MANAGER_FREERDP_ARGS"]);
         assert!(p.interactive, "stdin stays open for certificate questions");
         let (name, value) = &p.env[0];
@@ -754,6 +760,20 @@ mod tests {
         assert!(lines.contains(&"/size:1280x720"));
         assert!(!lines.iter().any(|l| l.starts_with("/cert")), "certificate checks stay on and are asked in a dialog");
         assert!(!p.display.contains("pa ss"));
+    }
+
+    #[test]
+    fn trusted_certificate_fingerprint() {
+        let mut c = Connection::new("Srv", Protocol::Rdp, None);
+        c.host = "srv".into();
+        let fp = "5630942daa7c67ce9e54ec4812257907d2dd2435c99165249b66baf95f1d5c05";
+        let p = plan(&c, None, &tools(3), None, Some(fp)).unwrap();
+        assert!(p.env[0].1.lines().any(|l| l == format!("/cert:fingerprint:sha256:{fp}")));
+        // Malformed fingerprints and FreeRDP 2 (no such option) are ignored.
+        let p = plan(&c, None, &tools(3), None, Some("zz")).unwrap();
+        assert!(!p.env[0].1.contains("/cert"));
+        let p = plan(&c, None, &tools(2), None, Some(fp)).unwrap();
+        assert!(!p.args.iter().any(|a| a.starts_with("/cert")));
     }
 
     #[test]
@@ -773,7 +793,7 @@ mod tests {
         c.options.rdp.ignore_certificate = true;
         c.options.rdp.window_mode = WindowMode::MultiMonitor;
         c.options.rdp.gateway = "gw.example".into();
-        let p = plan(&c, Some(&cred()), &tools(2), None).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(2), None, None).unwrap();
         assert!(p.env.is_empty());
         assert!(p.args.contains(&"/cert-ignore".to_string()));
         assert!(p.args.contains(&"/multimon".to_string()));
@@ -787,7 +807,7 @@ mod tests {
         let mut c = Connection::new("Linux", Protocol::Ssh, None);
         c.host = "box".into();
         c.port = 2222;
-        let p = plan(&c, Some(&cred()), &tools(3), None).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
         assert_eq!(p.program, "/usr/bin/xterm");
         let pos = p.args.iter().position(|a| a == "/usr/bin/sshpass").unwrap();
         assert_eq!(p.args[pos + 1], "-f");
@@ -809,7 +829,7 @@ mod tests {
         c.host = "srv".into();
         c.options.external.command = "remmina -c 'rdp://{U}@{T}:{PORT}'".into();
         c.port = 3389;
-        let p = plan(&c, Some(&cred()), &tools(3), None).unwrap();
+        let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
         assert_eq!(p.program, "remmina");
         assert_eq!(p.args, vec!["-c", "rdp://admin@srv:3389"]);
     }
@@ -822,7 +842,7 @@ mod tests {
                 let mut c = Connection::new("x", proto, None);
                 c.host = host.into();
                 c.options.external.command = "sh -c 'ping {T}'".into();
-                assert!(plan(&c, None, &tools(3), None).is_err(), "{proto:?} accepted host {host:?}");
+                assert!(plan(&c, None, &tools(3), None, None).is_err(), "{proto:?} accepted host {host:?}");
             }
         }
     }
@@ -832,11 +852,11 @@ mod tests {
         for url in ["file:///etc/passwd", "smb://evil/share", "javascript:alert(1)", "-x", "https://ok.example/ path"] {
             let mut c = Connection::new("W", Protocol::Web, None);
             c.host = url.into();
-            assert!(plan(&c, None, &tools(3), None).is_err(), "accepted {url:?}");
+            assert!(plan(&c, None, &tools(3), None, None).is_err(), "accepted {url:?}");
         }
         let mut c = Connection::new("W", Protocol::Web, None);
         c.host = "http://intranet/app?x=1".into();
-        assert!(plan(&c, None, &tools(3), None).is_ok());
+        assert!(plan(&c, None, &tools(3), None, None).is_ok());
     }
 
     #[test]
@@ -847,15 +867,15 @@ mod tests {
         for (kbd, res) in [("00000000", "0x0"), ("", ""), ("zz", "800x"), ("0x0", "x600")] {
             c.options.rdp.keyboard_layout = kbd.into();
             c.options.rdp.resolution = res.into();
-            let p = plan(&c, None, &tools(2), None).unwrap();
+            let p = plan(&c, None, &tools(2), None, None).unwrap();
             assert!(!p.args.iter().any(|a| a.starts_with("/kbd") || a.starts_with("/size")), "{kbd:?} {res:?}: {:?}", p.args);
         }
         c.options.rdp.keyboard_layout = "00000407".into();
         c.options.rdp.resolution = "1280X720".into();
-        let p = plan(&c, None, &tools(2), None).unwrap();
+        let p = plan(&c, None, &tools(2), None, None).unwrap();
         assert!(p.args.contains(&"/kbd:0x00000407".to_string()));
         assert!(p.args.contains(&"/size:1280x720".to_string()));
-        let p = plan(&c, None, &tools(3), None).unwrap();
+        let p = plan(&c, None, &tools(3), None, None).unwrap();
         assert!(p.env[0].1.lines().any(|l| l == "/kbd:layout:0x00000407"));
     }
 
@@ -864,7 +884,7 @@ mod tests {
         let e = EmbedTarget { host: 4242, width: 1000, height: 700, dark: true };
         let mut c = Connection::new("Srv", Protocol::Rdp, None);
         c.host = "srv".into();
-        let p = plan(&c, None, &tools(2), Some(&e)).unwrap();
+        let p = plan(&c, None, &tools(2), Some(&e), None).unwrap();
         assert!(p.args.contains(&"/parent-window:4242".to_string()));
         assert!(p.args.contains(&"/size:1000x700".to_string()));
         assert!(p.args.contains(&"/dynamic-resolution".to_string()));
@@ -872,20 +892,20 @@ mod tests {
         // Fixed resolution: scaled into the tab.
         c.options.rdp.dynamic_resolution = false;
         c.options.rdp.resolution = "1280x1024".into();
-        let p = plan(&c, None, &tools(2), Some(&e)).unwrap();
+        let p = plan(&c, None, &tools(2), Some(&e), None).unwrap();
         assert!(p.args.contains(&"/size:1280x1024".to_string()) && p.args.contains(&"/smart-sizing".to_string()));
 
         let mut c = Connection::new("Box", Protocol::Ssh, None);
         c.host = "box".into();
-        let p = plan(&c, None, &tools(3), Some(&e)).unwrap();
+        let p = plan(&c, None, &tools(3), Some(&e), None).unwrap();
         assert_eq!(p.program, "/usr/bin/xterm");
         assert_eq!(&p.args[..2], ["-into", "4242"]);
         assert!(p.args.ends_with(&["ssh".to_string(), "--".to_string(), "box".to_string()]));
 
         let mut c = Connection::new("V", Protocol::Vnc, None);
         c.host = "v".into();
-        assert!(plan(&c, None, &tools(3), Some(&e)).unwrap().adopt_window);
-        assert!(!plan(&c, None, &tools(3), None).unwrap().adopt_window);
+        assert!(plan(&c, None, &tools(3), Some(&e), None).unwrap().adopt_window);
+        assert!(!plan(&c, None, &tools(3), None, None).unwrap().adopt_window);
     }
 
     #[test]

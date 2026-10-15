@@ -88,6 +88,20 @@ struct PromptDialog {
     name: String,
     question: String,
     details: Vec<String>,
+    /// "host:port" and SHA-256 fingerprint of the certificate (from FreeRDP's details).
+    certificate: Option<(String, String)>,
+    /// FreeRDP reported that the certificate differs from the one trusted before.
+    changed: bool,
+}
+
+/// Reads "Certificate details for 127.0.0.1:3390 (RDP-Server):" and "Thumbprint: 56:30:…".
+fn certificate_of(details: &[String]) -> Option<(String, String)> {
+    let host_port = details.iter().find_map(|l| l.trim().strip_prefix("Certificate details for "))?;
+    let host_port = host_port.split([' ', ':']).collect::<Vec<_>>();
+    let host_port = format!("{}:{}", host_port.first()?, host_port.get(1)?.trim_end_matches(':'));
+    let thumb = details.iter().find_map(|l| l.trim().strip_prefix("Thumbprint:"))?;
+    let fp: String = thumb.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase();
+    (fp.len() == 64).then_some((host_port, fp))
 }
 
 /// A session shown as a tab; its client draws into the X11 window `host`.
@@ -630,7 +644,13 @@ impl App {
 
     fn launch(&mut self, conn: &Connection, cred: Option<&Credential>) {
         let embed = self.embed_target(conn);
-        let plan = match launch::plan(conn, cred, &self.tools, embed.as_ref()) {
+        let fingerprint = if conn.protocol == Protocol::Rdp {
+            let host_port = format!("{}:{}", conn.host.trim(), conn.effective_port());
+            self.store.trusted_fingerprint(&host_port).ok().flatten()
+        } else {
+            None
+        };
+        let plan = match launch::plan(conn, cred, &self.tools, embed.as_ref(), fingerprint.as_deref()) {
             Ok(p) => p,
             Err(e) => {
                 if let (Some(emb), Some(t)) = (&self.embedder, &embed) {
@@ -722,8 +742,10 @@ impl App {
                             .iter()
                             .rposition(|l| l.contains("Certificate details") || l.contains("@@@@") || l.contains("has changed"))
                             .unwrap_or(s.recent.len().saturating_sub(12));
-                        let details = s.recent.iter().skip(start).map(|l| strip_log_prefix(l)).filter(|l| !l.trim().is_empty() && !l.contains("@@@@")).collect();
-                        self.prompts.push_back(PromptDialog { session, name: s.name.clone(), question: text, details });
+                        let details: Vec<String> = s.recent.iter().skip(start).map(|l| strip_log_prefix(l)).filter(|l| !l.trim().is_empty() && !l.contains("@@@@")).collect();
+                        let changed = s.recent.iter().any(|l| l.contains("HAS CHANGED") || l.contains("has changed"));
+                        let certificate = certificate_of(&details);
+                        self.prompts.push_back(PromptDialog { session, name: s.name.clone(), question: text, details, certificate, changed });
                     }
                 }
                 Event::Output { session, line } => {
@@ -1590,7 +1612,12 @@ impl App {
         Self::modal(if certificate { "Certificate Check" } else { "Question" }).show(ctx, |ui| {
             ui.set_max_width(560.0);
             ui.label(RichText::new(format!("{}:", p.name)).strong());
-            if certificate {
+            if p.changed {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    RichText::new("The certificate of this server has CHANGED since it was trusted. This can mean that someone intercepts the connection (man in the middle). Only continue if you know that the server got a new certificate.").strong(),
+                );
+            } else if certificate {
                 ui.label("The identity of the server could not be verified. Check the details below; trust the certificate only if it really belongs to this server.");
             }
             theme::list_frame(ui, |ui| {
@@ -1607,8 +1634,9 @@ impl App {
                     if ui.button("Trust once").clicked() {
                         answer = Some("Y");
                     }
-                    if ui.button("Trust always").on_hover_text("Remember this certificate for this server").clicked() {
-                        answer = Some("T");
+                    let remember = ui.add_enabled(p.certificate.is_some(), egui::Button::new("Trust always"));
+                    if remember.on_hover_text("Remember the fingerprint of this certificate for this server").clicked() {
+                        answer = Some("always");
                     }
                     if ui.button("Cancel connection").clicked() {
                         answer = Some("N");
@@ -1623,8 +1651,18 @@ impl App {
                 }
             });
         });
-        if let Some(a) = answer {
+        if let Some(mut a) = answer {
             let p = self.prompts.pop_front().unwrap();
+            if a == "always" {
+                // Accept now and remember the fingerprint in RC Manager's own store.
+                a = "Y";
+                if let Some((host_port, fp)) = &p.certificate {
+                    match self.store.trust_certificate(host_port, fp) {
+                        Ok(()) => self.push(Level::Info, format!("Certificate of {host_port} is trusted from now on.")),
+                        Err(e) => self.push(Level::Warn, format!("Cannot remember the certificate: {e:#}")),
+                    }
+                }
+            }
             let ok = self.sessions.get_mut(&p.session).and_then(|s| s.stdin.as_mut()).map(|stdin| {
                 use std::io::Write;
                 stdin.write_all(format!("{a}\n").as_bytes()).and_then(|_| stdin.flush()).is_ok()
@@ -2350,5 +2388,25 @@ impl eframe::App for App {
         if !self.locked && self.editor_dirty() {
             self.save_editor();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_from_freerdp_details() {
+        let details: Vec<String> = [
+            "Certificate details for 127.0.0.1:3390 (RDP-Server):",
+            "\tCommon Name: runnervmk1d70",
+            "\tThumbprint:  56:30:94:2d:aa:7c:67:ce:9e:54:ec:48:12:25:79:07:d2:dd:24:35:c9:91:65:24:9b:66:ba:f9:5f:1d:5c:05",
+        ]
+        .map(String::from)
+        .to_vec();
+        let (hp, fp) = certificate_of(&details).unwrap();
+        assert_eq!(hp, "127.0.0.1:3390");
+        assert_eq!(fp, "5630942daa7c67ce9e54ec4812257907d2dd2435c99165249b66baf95f1d5c05");
+        assert!(certificate_of(&details[..2]).is_none());
     }
 }

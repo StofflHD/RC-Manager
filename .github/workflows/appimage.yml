@@ -132,17 +132,13 @@ jobs:
           export DISPLAY=:99
           DATA=$(mktemp -d)
           squashfs-root/AppRun --data-dir "$DATA" --import gui-test.db3
-          # Unknown self-signed certificate: RC Manager has to ask (screenshot 0).
-          squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-cert.log 2>&1 &
+          # Unknown self-signed certificate: RC Manager has to ask (screenshot 0); the test
+          # clicks "Trust always" in the dialog (centre of the 1150x780 window).
+          squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp.log 2>&1 &
           APP=$!
           sleep 10
           import -window root gui/0-certificate-dialog.png
-          kill $APP || true
-          sleep 2
-          # Trust it via FreeRDP itself ("T" = remember), then connect again.
-          printf 'T\n' | timeout 20 squashfs-root/usr/bin/xfreerdp /v:127.0.0.1 /port:3390 +auth-only /u:test /p:test > gui/trust.log 2>&1 || true
-          squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp.log 2>&1 &
-          APP=$!
+          xdotool mousemove 421 511 click 1
           sleep 15
           import -window root gui/1-rdp-tab.png
           xwininfo -root -tree > gui/1-windows.txt
@@ -152,6 +148,13 @@ jobs:
           sleep 10
           import -window root gui/2-rdp-resized.png
           xwininfo -root -tree > gui/2-windows.txt
+          kill $APP || true
+          sleep 3
+          # Second connection: the remembered fingerprint must be accepted without a dialog.
+          squashfs-root/AppRun --data-dir "$DATA" --connect DC01 > gui/app-rdp2.log 2>&1 &
+          APP=$!
+          sleep 15
+          import -window root gui/4-rdp-reconnect.png
           kill $APP || true
           sleep 3
           squashfs-root/AppRun --data-dir "$DATA" --connect Linux-Box > gui/app-ssh.log 2>&1 &

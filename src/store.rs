@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS credentials (
     domain TEXT NOT NULL DEFAULT '',
     secret BLOB
 );
+-- Server certificates the user chose to trust: SHA-256 fingerprint per "host:port".
+CREATE TABLE IF NOT EXISTS trusted_certs (
+    host_port TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    added TEXT NOT NULL DEFAULT (datetime('now'))
+);
 "#;
 
 pub struct Store {
@@ -312,6 +318,22 @@ impl Store {
         Ok(())
     }
 
+    /// SHA-256 fingerprint (lower-case hex) of the certificate trusted for `host:port`.
+    pub fn trusted_fingerprint(&self, host_port: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row("SELECT fingerprint FROM trusted_certs WHERE host_port = ?1", [host_port.to_ascii_lowercase()], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn trust_certificate(&self, host_port: &str, fingerprint: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO trusted_certs (host_port, fingerprint) VALUES (?1, ?2)",
+            params![host_port.to_ascii_lowercase(), fingerprint],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_credential(&self, id: Uuid) -> Result<()> {
         let s = id.to_string();
         self.db.execute("DELETE FROM credentials WHERE id = ?1", [&s])?;
@@ -410,6 +432,10 @@ mod tests {
         let mut s = Store::open(&dir).unwrap();
         s.unlock(None).unwrap();
         assert_eq!(s.load().unwrap().credentials[0].password, "S3cret!");
+
+        assert_eq!(s.trusted_fingerprint("Srv:3389").unwrap(), None);
+        s.trust_certificate("Srv:3389", "ab12").unwrap();
+        assert_eq!(s.trusted_fingerprint("srv:3389").unwrap().as_deref(), Some("ab12"));
 
         s.delete_credential(cred.id).unwrap();
         assert_eq!(s.load().unwrap().connections[0].credential, CredentialRef::Inherit);
