@@ -251,6 +251,7 @@ fn now_string() -> String {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, tools: Tools, connect: Vec<String>) -> Self {
+        theme::install_fonts(&cc.egui_ctx);
         let s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
         let (events_tx, events_rx) = channel();
         let (bg_tx, bg_rx) = channel();

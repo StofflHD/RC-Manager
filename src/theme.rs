@@ -124,6 +124,17 @@ pub fn visuals(dark: bool) -> Visuals {
     v
 }
 
+/// egui's default fonts; Hack (otherwise monospace only) is added as the last fallback for
+/// proportional text, which lacks arrows and triangles such as → ▲ ▼.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    let mono = fonts.families.get(&egui::FontFamily::Monospace).and_then(|f| f.first()).cloned();
+    if let Some(mono) = mono {
+        fonts.families.entry(egui::FontFamily::Proportional).or_default().push(mono);
+    }
+    ctx.set_fonts(fonts);
+}
+
 pub fn apply(ctx: &egui::Context, dark: bool) {
     ctx.set_visuals(visuals(dark));
 }
