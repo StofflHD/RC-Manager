@@ -487,8 +487,10 @@ fn in_terminal(tools: &Tools, title: &str, cmd: Vec<String>) -> Result<(String, 
 
 /// Runs a command in an xterm drawn into a tab, coloured like RC Manager's theme.
 fn in_xterm(xterm: &str, e: &EmbedTarget, title: &str, cmd: Vec<String>) -> (String, Vec<String>) {
-    let (bg, fg) = if e.dark { ("#101010", "#e1e1e1") } else { ("#ffffff", "#141414") };
-    let mut args: Vec<String> = ["-into", &e.host.to_string(), "-T", title, "-fa", "DejaVu Sans Mono:size=11", "-bg", bg, "-fg", fg, "-cr", "#0066cc"]
+    let hex = |c: egui::Color32| format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
+    let (bg, fg) = crate::theme::session_colors(e.dark);
+    let (bg, fg, cr) = (hex(bg), hex(fg), hex(crate::theme::accent(e.dark)));
+    let mut args: Vec<String> = ["-into", &e.host.to_string(), "-T", title, "-fa", "DejaVu Sans Mono:size=11", "-bg", &bg, "-fg", &fg, "-cr", &cr]
         .iter()
         .map(|s| s.to_string())
         .collect();
