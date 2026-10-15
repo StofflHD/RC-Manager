@@ -38,10 +38,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.FREERDP_PREFIX }}
-          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-v1
+          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-v2
 
       - name: Build FreeRDP ${{ env.FREERDP_VERSION }}
         if: steps.freerdp-cache.outputs.cache-hit != 'true'
+        # Outside the checkout: FreeRDP takes its version from `git describe` when it finds
+        # a git repository, which would pick up RC Manager's tags.
+        working-directory: ${{ runner.temp }}
         run: |
           curl -fsSL -o freerdp.tar.gz \
             "https://github.com/FreeRDP/FreeRDP/archive/refs/tags/${FREERDP_VERSION}.tar.gz"
@@ -60,7 +63,8 @@ jobs:
           cmake --build freerdp-build
           sudo cmake --install freerdp-build
           sudo install -Dm644 "FreeRDP-${FREERDP_VERSION}/LICENSE" "$FREERDP_PREFIX/share/doc/freerdp-LICENSE"
-          "$FREERDP_PREFIX/bin/"xfreerdp* --version
+          "$FREERDP_PREFIX/bin/"xfreerdp* --version | tee version.txt
+          grep -q "version ${FREERDP_VERSION}" version.txt
 
       - uses: dtolnay/rust-toolchain@stable
 
