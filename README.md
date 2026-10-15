@@ -4,7 +4,8 @@ RC Manager (Remote Connection Manager) is a Rust re-implementation of the Window
 a connection manager with a folder tree, stored credentials and quick connect. The sessions
 themselves run in the established Linux clients (FreeRDP, OpenSSH, TigerVNC, your browser).
 
-Look and feel (DejaVu Sans, colours, light and dark theme) match the
+Look and feel (the "Rust" colour scheme with light and dark theme, icon style) match
+[notepad-rs](https://github.com/StofflHD/notepad-rs) and the
 [IP Calculator](https://github.com/StofflHD/IP-Calculator). Switch themes via *Options → Dark Theme*. The connection sidebar collapses to a narrow strip
 (« button, *Options → Show Sidebar* or Ctrl+B); hovering the strip shows the sidebar as an
 overlay that hides again when the mouse leaves, a click on the strip (or 📌) docks it again.
@@ -207,7 +208,7 @@ decrypted passwords stay in memory while the app is unlocked.
 ```
 src/main.rs            start-up, command line
 src/app.rs             user interface (egui)
-src/theme.rs           fonts, colours, light/dark theme, logo
+src/theme.rs           colours (light/dark theme), header, logo
 src/model.rs           folders, connections, credentials
 src/store.rs           SQLite storage
 src/vault.rs           password encryption
