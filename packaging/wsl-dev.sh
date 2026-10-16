@@ -118,6 +118,17 @@ cmd_gui() {
     "$app" --data-dir "$data" --connect DC01 > "$out/app-rdp2.log" 2>&1 & a=$!
     sleep 10
     import -window root "$out/3-reconnect.png"
+    echo "==> 3a: connected entry in the accent colour (folder Server unfolded)"
+    xdotool mousemove 38 190 click 1; sleep 2
+    import -window root "$out/3a-tree-connected.png"
+    echo "==> 3c: sidebar collapsed, overlay on hover – the session stays visible"
+    local w3; w3="$(xdotool search --name '^RC Manager$' | head -1)"
+    xdotool mousemove 700 60 click 1; sleep 1          # keyboard to RC Manager (header)
+    xdotool windowfocus "$w3"; xdotool key --window "$w3" ctrl+b; sleep 2
+    xdotool mousemove 14 400; sleep 2
+    import -window root "$out/3c-sidebar-overlay.png"
+    xdotool mousemove 700 400; sleep 2
+    xdotool windowfocus "$w3"; xdotool key --window "$w3" ctrl+b; sleep 2
     echo "==> 3b: middle click closes the tab – one quiet log line"
     xdotool mousemove 360 98 click 2; sleep 3
     import -window root "$out/3b-tab-closed.png"

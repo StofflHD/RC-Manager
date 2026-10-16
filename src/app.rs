@@ -226,7 +226,7 @@ struct SessionTab {
     /// TigerVNC opens its own window, which is moved into the tab once it appears.
     adopt: Option<(u32, Instant)>,
     /// Last geometry given to the host (physical pixels) and whether it was visible.
-    placed: Option<(i32, i32, u32, u32, bool)>,
+    placed: Option<((i32, i32, u32, u32, bool), Vec<[i32; 4]>)>,
     last_fit: Instant,
 }
 
@@ -1054,7 +1054,13 @@ impl App {
 
     fn connection_row(&self, ui: &mut egui::Ui, c: &Connection, label: String, actions: &mut Vec<Action>) {
         let selected = self.selection == Some(Sel::Connection(c.id));
-        let r = ui.selectable_label(selected, format!("{} {label}", c.protocol.icon()));
+        // Connected systems are marked in the accent colour, as in the original.
+        let connected = self.sessions.values().any(|s| s.conn.id == c.id);
+        let mut text = RichText::new(format!("{} {label}", c.protocol.icon()));
+        if connected {
+            text = text.color(theme::accent(ui.visuals().dark_mode)).strong();
+        }
+        let r = ui.selectable_label(selected, text);
         let r = if c.description.is_empty() { r.on_hover_text(&c.host) } else { r.on_hover_text(format!("{}\n\n{}", c.host, c.description)) };
         if r.clicked() {
             actions.push(Action::Select(Sel::Connection(c.id)));
@@ -2401,15 +2407,24 @@ impl App {
         }
         let ppp = ctx.pixels_per_point();
         let rect = if self.locked { None } else { self.session_rect };
-        let covered = rect.is_some_and(|r| {
-            ctx.memory(|m| {
-                m.areas()
-                    .visible_layer_ids()
-                    .into_iter()
-                    .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::Tooltip))
-                    .any(|l| m.area_rect(l.id).is_some_and(|a| a.intersects(r)))
+        // Menus, dialogs, tooltips and the sidebar overlay over the session: cut out of the
+        // session window (their shadows stay hidden), or hide it without SHAPE.
+        let covers: Vec<egui::Rect> = rect
+            .map(|r| {
+                ctx.memory(|m| {
+                    m.areas()
+                        .visible_layer_ids()
+                        .into_iter()
+                        .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::PanelResizeLine))
+                        .filter_map(|l| m.area_rect(l.id))
+                        .map(|a| a.expand(1.0))
+                        .filter(|a| a.intersects(r))
+                        .collect()
+                })
             })
-        });
+            .unwrap_or_default();
+        let shape = emb.can_shape();
+        let covered = !covers.is_empty() && !shape;
         let mut logs = Vec::new();
         let mut focus_change = None;
         for tab in &mut self.tabs {
@@ -2427,6 +2442,18 @@ impl App {
                 }
             }
             let visible = Some(tab.session) == self.active_tab && rect.is_some() && !covered;
+            let holes: Vec<[i32; 4]> = match rect.filter(|_| visible && shape) {
+                Some(r) => covers
+                    .iter()
+                    .map(|a| {
+                        let a = a.intersect(r);
+                        let (x0, y0) = (((a.min.x - r.min.x) * ppp).floor() as i32, ((a.min.y - r.min.y) * ppp).floor() as i32);
+                        let (x1, y1) = (((a.max.x - r.min.x) * ppp).ceil() as i32, ((a.max.y - r.min.y) * ppp).ceil() as i32);
+                        [x0, y0, x1 - x0, y1 - y0]
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
             let geom = match rect.filter(|_| visible) {
                 Some(r) => (
                     (r.min.x * ppp).round() as i32,
@@ -2435,21 +2462,26 @@ impl App {
                     (r.height() * ppp).round().max(1.0) as u32,
                     true,
                 ),
-                None => tab.placed.map(|(x, y, w, h, _)| (x, y, w, h, false)).unwrap_or((0, 0, 1, 1, false)),
+                None => tab.placed.as_ref().map(|((x, y, w, h, _), _)| (*x, *y, *w, *h, false)).unwrap_or((0, 0, 1, 1, false)),
             };
+            let state = (geom, holes);
             // Clients create their window a moment after starting: fit them again now and then.
             let refit = visible && tab.last_fit.elapsed() > Duration::from_millis(500);
-            if tab.placed != Some(geom) || refit {
-                if let Err(e) = emb.place(tab.host, geom.0, geom.1, geom.2, geom.3, geom.4) {
+            if tab.placed.as_ref() != Some(&state) || refit {
+                if let Err(e) = emb.place(tab.host, geom.0, geom.1, geom.2, geom.3, geom.4, &state.1) {
                     logs.push((Level::Warn, format!("{}: {e:#}", tab.name)));
                 }
-                tab.placed = Some(geom);
+                tab.placed = Some(state.clone());
                 tab.last_fit = Instant::now();
             }
             // Keyboard: a click into the session gives it the focus.
             if visible && self.session_focus != Some(tab.session) {
                 if let Some(p) = emb.pointer() {
                     let inside = p.x >= geom.0 && p.y >= geom.1 && p.x < geom.0 + geom.2 as i32 && p.y < geom.1 + geom.3 as i32;
+                    // A click into a cut-out area belongs to RC Manager.
+                    let (hx, hy) = (p.x - geom.0, p.y - geom.1);
+                    let in_hole = state.1.iter().any(|&[x, y, w, h]| hx >= x && hy >= y && hx < x + w && hy < y + h);
+                    let inside = inside && !in_hole;
                     if p.pressed && inside {
                         focus_change = Some(Some((tab.session, tab.host)));
                     }

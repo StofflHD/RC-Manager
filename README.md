@@ -48,7 +48,8 @@ the window size, like in the original:
   server supports it, otherwise shown centred (TigerVNC cannot scale).
 
 Click into a session to type there; a click anywhere in RC Manager takes the keyboard back.
-A session is hidden while a menu, dialog or the sidebar overlay covers it. Close a session with
+Menus, dialogs and the sidebar overlay are cut out of a session (X11 SHAPE), so it stays
+visible around them; connected systems are marked in the accent colour in the tree. Close a session with
 ✖ or a middle click on its tab. *Options → Open Sessions in Tabs* switches back to separate
 windows; the window mode of an RDP connection (*Tab*, *Separate window*, *Full screen*) applies
 per connection. `rc-manager --connect <name>` opens connections at start.

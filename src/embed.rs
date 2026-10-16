@@ -7,6 +7,10 @@
 //! and resized with the tab; the client window inside is resized to fill it, which makes
 //! FreeRDP adapt the remote resolution (`/dynamic-resolution`) and xterm its terminal size.
 //!
+//! X11 child windows are drawn above everything RC Manager paints. Where a menu, dialog or
+//! the sidebar overlay covers a session, that area is cut out of the host window (SHAPE
+//! extension), so the session stays visible around it.
+//!
 //! This needs X11; on Wayland desktops RC Manager runs via XWayland (see `main.rs`).
 
 #[cfg(target_os = "linux")]
@@ -14,8 +18,10 @@ mod imp {
     use anyhow::{Context, Result};
     use x11rb::connection::{Connection, RequestConnection};
     use x11rb::protocol::res::{self, ClientIdMask, ClientIdSpec, ConnectionExt as _};
+    use x11rb::protocol::shape::{self, ConnectionExt as _, SK, SO};
     use x11rb::protocol::xproto::{
-        ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, InputFocus, KeyButMask, MapState, WindowClass,
+        ClipOrdering, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask, InputFocus, KeyButMask, MapState, Rectangle,
+        WindowClass,
     };
     use x11rb::rust_connection::RustConnection;
 
@@ -63,12 +69,27 @@ mod imp {
         }
 
         /// Moves/resizes the host (physical pixels, relative to RC Manager's window) and
-        /// makes every client window inside fill it.
-        pub fn place(&self, host: u32, x: i32, y: i32, w: u32, h: u32, visible: bool) -> Result<()> {
+        /// makes every client window inside fill it. `holes` (relative to the host) are cut
+        /// out of it, so RC Manager's own content shows (and gets the clicks) there.
+        pub fn place(&self, host: u32, x: i32, y: i32, w: u32, h: u32, visible: bool, holes: &[[i32; 4]]) -> Result<()> {
             let (w, h) = (w.max(1), h.max(1));
             self.conn.configure_window(host, &ConfigureWindowAux::new().x(x).y(y).width(w).height(h))?;
             for child in self.conn.query_tree(host)?.reply()?.children {
                 self.conn.configure_window(child, &ConfigureWindowAux::new().x(0).y(0).width(w).height(h))?;
+            }
+            if self.can_shape() {
+                if holes.is_empty() {
+                    // Back to the plain rectangle.
+                    self.conn.shape_mask(SO::SET, SK::BOUNDING, host, 0, 0, x11rb::NONE)?;
+                } else {
+                    let full = Rectangle { x: 0, y: 0, width: w as u16, height: h as u16 };
+                    self.conn.shape_rectangles(SO::SET, SK::BOUNDING, ClipOrdering::UNSORTED, host, 0, 0, &[full])?;
+                    let cut: Vec<Rectangle> = holes
+                        .iter()
+                        .map(|&[x, y, w, h]| Rectangle { x: x as i16, y: y as i16, width: w.max(0) as u16, height: h.max(0) as u16 })
+                        .collect();
+                    self.conn.shape_rectangles(SO::SUBTRACT, SK::BOUNDING, ClipOrdering::UNSORTED, host, 0, 0, &cut)?;
+                }
             }
             if visible {
                 self.conn.map_window(host)?;
@@ -144,6 +165,11 @@ mod imp {
         pub fn can_adopt(&self) -> bool {
             self.conn.extension_information(res::X11_EXTENSION_NAME).ok().flatten().is_some()
         }
+
+        /// Without the SHAPE extension a covered session has to be hidden.
+        pub fn can_shape(&self) -> bool {
+            self.conn.extension_information(shape::X11_EXTENSION_NAME).ok().flatten().is_some()
+        }
     }
 }
 
@@ -166,7 +192,7 @@ mod imp {
         pub fn create_host(&self) -> Result<u32> {
             unreachable!()
         }
-        pub fn place(&self, _host: u32, _x: i32, _y: i32, _w: u32, _h: u32, _visible: bool) -> Result<()> {
+        pub fn place(&self, _host: u32, _x: i32, _y: i32, _w: u32, _h: u32, _visible: bool, _holes: &[[i32; 4]]) -> Result<()> {
             Ok(())
         }
         pub fn client_of(&self, _host: u32) -> Option<u32> {
@@ -184,6 +210,9 @@ mod imp {
         pub fn focus(&self, _win: Option<u32>) {}
         pub fn destroy(&self, _host: u32) {}
         pub fn can_adopt(&self) -> bool {
+            false
+        }
+        pub fn can_shape(&self) -> bool {
             false
         }
     }
