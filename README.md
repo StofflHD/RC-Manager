@@ -26,7 +26,8 @@ then keeps the active sessions and a counter of new warnings visible.
 | External programs with placeholders | ✔ | ✔ (`{T} {PORT} {N} {U} {D} {P}`) |
 | Credentials, inheritance via folders | ✔ (per protocol) | ✔ (one set per folder) |
 | Master / application password | ✔ | ✔ (Argon2id + ChaCha20-Poly1305) |
-| Wake-on-LAN, reachability check | ✔ | ✔ |
+| Properties dialog in the context menu of an entry | ✔ | ✔ |
+| Wake-on-LAN, reachability check | ✔ (`ping -t` window) | ✔ (dialog: `ping` and a TCP check of the port every 2 s) |
 | Import of .rdp files | ✔ | ✔ |
 | **Import of the Windows database** | – | ✔ including passwords and settings |
 | Light / dark theme | – | ✔ |

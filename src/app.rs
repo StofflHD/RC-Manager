@@ -57,6 +57,8 @@ enum Action {
     AskDelete(Sel),
     Wake(Uuid),
     CheckPort(Uuid),
+    /// Opens the properties dialog of a folder or connection (the original's "Edit").
+    Edit(Sel),
     SetExpanded(Uuid, bool),
 }
 
@@ -111,6 +113,106 @@ fn certificate_of(details: &[String]) -> Option<(String, String)> {
     let thumb = details.iter().find_map(|l| l.trim().strip_prefix("Thumbprint:"))?;
     let fp: String = thumb.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase();
     (fp.len() == 64).then_some((host_port, fp))
+}
+
+/// "HH:MM:SS UTC" of now.
+fn clock() -> String {
+    let s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) % 86_400;
+    format!("{:02}:{:02}:{:02} UTC", s / 3600, s / 60 % 60, s % 60)
+}
+
+/// The continuous reachability check of one connection: a TCP connect to its port every two
+/// seconds and, if available, the system's `ping`, until the dialog is closed.
+struct Reachability {
+    name: String,
+    host: String,
+    port: u16,
+    lines: Vec<(Level, String)>,
+    rx: Receiver<(Level, String)>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ping: Option<std::process::Child>,
+}
+
+impl Reachability {
+    fn start(name: String, host: String, port: u16, ctx: egui::Context) -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (tx, rx) = channel();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        {
+            let (tx, stop, ctx, host) = (tx.clone(), stop.clone(), ctx.clone(), host.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let msg = match net::check_port(&host, port, Duration::from_secs(3)) {
+                        Ok(t) => (Level::Info, format!("{} port {port}: reachable ({} ms)", clock(), t.as_millis())),
+                        Err(e) => (Level::Warn, format!("{} port {port}: not reachable – {e}", clock())),
+                    };
+                    if tx.send(msg).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                    for _ in 0..20 {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            });
+        }
+        // ICMP via the system's ping (it has the needed privileges); optional.
+        let ping = launch::find_in_path("ping").and_then(|p| {
+            std::process::Command::new(p)
+                .arg(&host)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .ok()
+        });
+        let mut ping = ping;
+        match ping.as_mut() {
+            Some(child) => {
+                for stream in [child.stdout.take().map(|s| Box::new(s) as Box<dyn std::io::Read + Send>), child.stderr.take().map(|s| Box::new(s) as _)]
+                    .into_iter()
+                    .flatten()
+                {
+                    let (tx, ctx) = (tx.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        use std::io::BufRead;
+                        for line in std::io::BufReader::new(stream).lines().map_while(Result::ok) {
+                            if tx.send((Level::Info, format!("ping: {line}"))).is_err() {
+                                break;
+                            }
+                            ctx.request_repaint();
+                        }
+                    });
+                }
+            }
+            None => tx.send((Level::Info, "ping is not installed – only the port is checked.".into())).unwrap_or(()),
+        }
+        Self { name, host, port, lines: Vec::new(), rx, stop, ping }
+    }
+
+    fn poll(&mut self) {
+        while let Ok(l) = self.rx.try_recv() {
+            self.lines.push(l);
+        }
+        if self.lines.len() > 500 {
+            self.lines.drain(..self.lines.len() - 500);
+        }
+    }
+
+}
+
+/// Closing the dialog (or the app) ends the checks and the ping process.
+impl Drop for Reachability {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(mut p) = self.ping.take() {
+            p.kill().ok();
+            p.wait().ok();
+        }
+    }
 }
 
 /// A session shown as a tab; its client draws into the X11 window `host`.
@@ -197,6 +299,10 @@ pub struct App {
     tabs: Vec<SessionTab>,
     /// Session shown in the central area; `None` shows the connection properties.
     active_tab: Option<u64>,
+    /// The properties dialog for the selected entry is open.
+    props_open: bool,
+    /// Running reachability check (dialog).
+    reach: Option<Reachability>,
     /// Central area of the active session tab (points), set while drawing.
     session_rect: Option<egui::Rect>,
     /// Session that has the keyboard focus.
@@ -210,8 +316,6 @@ pub struct App {
     next_session: u64,
     events_tx: Sender<Event>,
     events_rx: Receiver<Event>,
-    bg_tx: Sender<(Level, String)>,
-    bg_rx: Receiver<(Level, String)>,
     ctx: egui::Context,
 
     show_credentials: bool,
@@ -254,7 +358,6 @@ impl App {
         theme::install_fonts(&cc.egui_ctx);
         let s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
         let (events_tx, events_rx) = channel();
-        let (bg_tx, bg_rx) = channel();
         let locked = store.has_master_password().unwrap_or(false);
         let mut app = Self {
             s,
@@ -278,6 +381,8 @@ impl App {
             embed_checked: false,
             tabs: Vec::new(),
             active_tab: None,
+            props_open: false,
+            reach: None,
             session_rect: None,
             session_focus: None,
             pending_connect: connect,
@@ -287,8 +392,6 @@ impl App {
             next_session: 1,
             events_tx,
             events_rx,
-            bg_tx,
-            bg_rx,
             ctx: cc.egui_ctx.clone(),
             show_credentials: false,
             cred_selected: None,
@@ -500,6 +603,10 @@ impl App {
     fn apply(&mut self, action: Action) {
         match action {
             Action::Select(s) => self.select(Some(s)),
+            Action::Edit(s) => {
+                self.select(Some(s));
+                self.props_open = self.editor.is_some();
+            }
             Action::Connect(id) => {
                 self.select(Some(Sel::Connection(id)));
                 self.connect(id);
@@ -514,6 +621,7 @@ impl App {
                         self.set_expanded(p, true);
                     }
                     self.select(Some(Sel::Folder(id)));
+                    self.props_open = true;
                 }
             }
             Action::NewConnection(parent, protocol) => {
@@ -525,6 +633,7 @@ impl App {
                         self.set_expanded(p, true);
                     }
                     self.select(Some(Sel::Connection(id)));
+                    self.props_open = true;
                 }
             }
             Action::Duplicate(id) => {
@@ -536,6 +645,7 @@ impl App {
                         let nid = c.id;
                         self.data.connections.push(c);
                         self.select(Some(Sel::Connection(nid)));
+                        self.props_open = true;
                     }
                 }
             }
@@ -550,23 +660,13 @@ impl App {
             }
             Action::CheckPort(id) => {
                 if let Some(c) = self.connection(id).cloned() {
-                    let tx = self.bg_tx.clone();
                     let port = if c.protocol == Protocol::Web && c.port == 0 && c.host.starts_with("http://") { 80 } else { c.effective_port() };
                     let host = if c.protocol == Protocol::Web {
                         c.host.split("://").last().unwrap_or("").split(['/', ':']).next().unwrap_or("").to_string()
                     } else {
-                        c.host.clone()
+                        c.host.trim().to_string()
                     };
-                    self.push(Level::Info, format!("Checking {host}:{port} …"));
-                    let ctx = self.ctx.clone();
-                    std::thread::spawn(move || {
-                        let msg = match net::check_port(&host, port, Duration::from_secs(3)) {
-                            Ok(t) => (Level::Info, format!("{host}:{port} is reachable ({} ms).", t.as_millis())),
-                            Err(e) => (Level::Warn, format!("{host}:{port} is not reachable: {e}")),
-                        };
-                        tx.send(msg).ok();
-                        ctx.request_repaint();
-                    });
+                    self.reach = Some(Reachability::start(c.name.clone(), host, port, self.ctx.clone()));
                 }
             }
             Action::SetExpanded(id, open) => self.set_expanded(id, open),
@@ -827,9 +927,6 @@ impl App {
                 }
             }
         }
-        while let Ok((lvl, msg)) = self.bg_rx.try_recv() {
-            self.push(lvl, msg);
-        }
     }
 }
 
@@ -956,6 +1053,10 @@ impl App {
                 actions.push(Action::Connect(c.id));
                 ui.close_menu();
             }
+            if ui.button("✏ Properties …").clicked() {
+                actions.push(Action::Edit(Sel::Connection(c.id)));
+                ui.close_menu();
+            }
             if ui.button("Duplicate").clicked() {
                 actions.push(Action::Duplicate(c.id));
                 ui.close_menu();
@@ -995,6 +1096,10 @@ impl App {
                         }
                         new_connection_menu(ui, Some(f.id), actions);
                         ui.separator();
+                        if ui.button("✏ Properties …").clicked() {
+                            actions.push(Action::Edit(Sel::Folder(f.id)));
+                            ui.close_menu();
+                        }
                         if ui.button("🗑 Delete Folder …").clicked() {
                             actions.push(Action::AskDelete(Sel::Folder(f.id)));
                             ui.close_menu();
@@ -1187,9 +1292,19 @@ impl App {
                 self.tab_strip(ui);
                 ui.add_space(2.0);
             }
+            if !self.active_tab.is_some_and(|id| self.tabs.iter().any(|t| t.session == id)) {
+                self.active_tab = self.tabs.first().map(|t| t.session);
+            }
             match self.active_tab {
-                Some(id) if self.tabs.iter().any(|t| t.session == id) => self.session_area(ui, id),
-                _ => self.editor_contents(ui, actions),
+                Some(id) => self.session_area(ui, id),
+                None => {
+                    let _ = actions;
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            RichText::new("Double-click a connection to connect.\nRight-click an entry for its properties and more.").weak(),
+                        )
+                    });
+                }
             }
         });
     }
@@ -1199,13 +1314,10 @@ impl App {
         egui::ScrollArea::horizontal().id_salt("session_tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let props = RichText::new("🗐 Properties");
-                let sel = self.active_tab.is_none();
-                if ui.add(egui::SelectableLabel::new(sel, if sel { props.strong() } else { props })).clicked() {
-                    self.active_tab = None;
-                }
-                for t in &self.tabs {
-                    ui.separator();
+                for (i, t) in self.tabs.iter().enumerate() {
+                    if i > 0 {
+                        ui.separator();
+                    }
                     let sel = self.active_tab == Some(t.session);
                     let text = RichText::new(format!("{} {}", t.icon, t.name));
                     let r = ui.add(egui::SelectableLabel::new(sel, if sel { text.strong() } else { text }));
@@ -1245,7 +1357,6 @@ impl App {
                 ui.centered_and_justified(|ui| ui.label(RichText::new("Select a connection or folder.\nDouble-click connects.").weak()));
                 return;
             };
-            let dirty = self.editor_dirty();
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 match &mut editor {
                     Editor::Folder(f) => {
@@ -1333,21 +1444,6 @@ impl App {
                         Self::protocol_options(ui, c);
                     }
                 }
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(dirty, egui::Button::new("💾 Save")).clicked() {
-                        actions.push(Action::Select(match &editor {
-                            Editor::Folder(f) => Sel::Folder(f.id),
-                            Editor::Connection(c) => Sel::Connection(c.id),
-                        }));
-                    }
-                    if ui.add_enabled(dirty, egui::Button::new("Revert")).clicked() {
-                        editor = self.editor_original.clone().unwrap_or(editor.clone());
-                    }
-                    if dirty {
-                        ui.label(RichText::new("unsaved – saved automatically when switching").weak());
-                    }
-                });
             });
             self.editor = Some(editor);
         }
@@ -1536,6 +1632,97 @@ impl App {
                 });
             });
         });
+    }
+
+    /// Properties of the selected folder or connection, like the original's edit dialog.
+    fn ui_properties(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if !self.props_open || self.editor.is_none() {
+            self.props_open = false;
+            return;
+        }
+        let title = match &self.editor_original {
+            Some(Editor::Folder(f)) => format!("Properties – {}", f.name),
+            Some(Editor::Connection(c)) => format!("Properties – {}", c.name),
+            None => "Properties".into(),
+        };
+        let mut open = true;
+        let (mut ok, mut apply, mut cancel) = (false, false, false);
+        let max_h = ctx.screen_rect().height() * 0.85;
+        egui::Window::new(title)
+            .id(egui::Id::new("properties_dialog"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([640.0, 560.0f32.min(max_h)])
+            .max_height(max_h)
+            .pivot(Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                egui::TopBottomPanel::bottom("properties_buttons").show_inside(ui, |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ok = ui.button("OK").clicked();
+                        apply = ui.add_enabled(self.editor_dirty(), egui::Button::new("Apply")).clicked();
+                        cancel = ui.button("Cancel").clicked();
+                        if self.editor_dirty() {
+                            ui.label(RichText::new("unsaved changes").weak());
+                        }
+                    });
+                });
+                egui::CentralPanel::default().show_inside(ui, |ui| self.editor_contents(ui, actions));
+            });
+        // Escape cancels, as in the original's dialog (unless it closes a popup or the
+        // reachability dialog on top).
+        if self.reach.is_none() && !ctx.memory(|m| m.any_popup_open()) && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            cancel = true;
+        }
+        if ok || apply {
+            self.save_editor();
+            self.select(self.selection);
+        }
+        if cancel || !open {
+            self.editor = self.editor_original.clone();
+        }
+        if ok || cancel || !open {
+            self.props_open = false;
+        }
+    }
+
+    /// Continuous reachability check, like the original's "Ping" (ping -t).
+    fn ui_reachability(&mut self, ctx: &egui::Context) {
+        let Some(r) = &mut self.reach else { return };
+        r.poll();
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new(format!("Reachability – {}", r.name))
+            .id(egui::Id::new("reachability_dialog"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([620.0, 360.0])
+            .pivot(Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
+            .show(ctx, |ui| {
+                ui.label(format!("{} – port {} (TCP, every 2 s) and ping", r.host, r.port));
+                ui.add_space(4.0);
+                theme::list_frame(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+                        for (lvl, line) in &r.lines {
+                            let text = RichText::new(line).monospace();
+                            match lvl {
+                                Level::Info => ui.label(text),
+                                Level::Warn => ui.colored_label(ui.visuals().warn_fg_color, text),
+                                Level::Error => ui.colored_label(ui.visuals().error_fg_color, text),
+                            };
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                close = ui.button("Close").clicked();
+            });
+        if close || !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.reach = None;
+        }
     }
 
     fn modal(title: &str) -> egui::Window<'_> {
@@ -2444,6 +2631,8 @@ impl eframe::App for App {
         self.ui_bottom(ctx);
         self.ui_tree(ctx, &mut actions);
         self.ui_editor(ctx, &mut actions);
+        self.ui_properties(ctx, &mut actions);
+        self.ui_reachability(ctx);
         self.ui_dialogs(ctx);
         for a in actions {
             self.apply(a);

@@ -128,6 +128,21 @@ cmd_gui() {
     "$app" --data-dir "$data" --connect DC01 > "$out/app-rdp3.log" 2>&1 & a=$!
     sleep 10
     import -window root "$out/4-changed-certificate.png"
+    kill $a; sleep 2
+
+    echo "==> 5/6: context menu of VNC-Test – Properties, Check Reachability"
+    "$app" --data-dir "$data" > "$out/app-menu.log" 2>&1 & a=$!
+    sleep 6
+    xdotool mousemove 55 232 click 3; sleep 1        # right-click "VNC-Test"
+    xdotool mousemove 107 267 click 1; sleep 2       # "Properties …"
+    import -window root "$out/5-properties.png"
+    # Escape closes it (Xvfb has no window manager: give the window the keyboard focus first).
+    local wid; wid="$(xdotool search --name '^RC Manager$' | head -1)"
+    xdotool windowfocus "$wid"; xdotool key --window "$wid" Escape; sleep 1
+    import -window root "$out/5b-properties-closed.png"
+    xdotool mousemove 55 232 click 3; sleep 1
+    xdotool mousemove 114 309 click 1; sleep 7       # "Check Reachability"
+    import -window root "$out/6-reachability.png"
     kill $a; sleep 1
     echo "==> Screenshots: $out"
     ls "$out"
