@@ -86,6 +86,8 @@ struct Session {
     stdin: Option<std::process::ChildStdin>,
     /// Last lines of output, shown with prompts (certificate details).
     recent: VecDeque<String>,
+    /// Ended by RC Manager (tab closed): the client's shutdown messages are not logged.
+    closing: bool,
 }
 
 /// A question of a client waiting on stdin, e.g. FreeRDP's certificate check.
@@ -804,6 +806,7 @@ impl App {
                         pid,
                         stdin: spawned.stdin,
                         recent: VecDeque::new(),
+                        closing: false,
                     },
                 );
                 if let Some(t) = embed {
@@ -905,6 +908,11 @@ impl App {
                     }
                 }
                 Event::Output { session, line } => {
+                    // FreeRDP reports being stopped as errors ("Caught signal 'Terminated'",
+                    // ERRCONNECT_CONNECT_CANCELLED); for a closed tab that is no news.
+                    if self.sessions.get(&session).is_some_and(|s| s.closing) {
+                        continue;
+                    }
                     if let Some(s) = self.sessions.get_mut(&session) {
                         s.recent.push_back(line.clone());
                         while s.recent.len() > 40 {
@@ -918,6 +926,12 @@ impl App {
                 Event::Exited { session, code } => {
                     if let Some(s) = self.sessions.remove(&session) {
                         let dur = s.started.elapsed().as_secs();
+                        if s.closing {
+                            self.push(Level::Info, format!("[{session}] {} closed ({}m {}s).", s.name, dur / 60, dur % 60));
+                            self.remove_tab(session);
+                            self.prompts.retain(|p| p.session != session);
+                            continue;
+                        }
                         let lvl = if code.unwrap_or(0) == 0 { Level::Info } else { Level::Warn };
                         let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
                         self.push(lvl, format!("[{session}] {} ended (exit code {code}, {}m {}s).", s.name, dur / 60, dur % 60));
@@ -2348,7 +2362,8 @@ impl App {
 
     /// Ends a session (closing its tab follows when the process has exited).
     fn stop_session(&mut self, session: u64) {
-        if let Some(s) = self.sessions.get(&session) {
+        if let Some(s) = self.sessions.get_mut(&session) {
+            s.closing = true;
             #[cfg(unix)]
             {
                 std::process::Command::new("kill").arg(s.pid.to_string()).status().ok();

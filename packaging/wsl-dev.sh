@@ -118,6 +118,9 @@ cmd_gui() {
     "$app" --data-dir "$data" --connect DC01 > "$out/app-rdp2.log" 2>&1 & a=$!
     sleep 10
     import -window root "$out/3-reconnect.png"
+    echo "==> 3b: middle click closes the tab – one quiet log line"
+    xdotool mousemove 360 98 click 2; sleep 3
+    import -window root "$out/3b-tab-closed.png"
     kill $a; sleep 2
 
     echo "==> 4: new server certificate – warning"
