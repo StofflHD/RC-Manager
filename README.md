@@ -25,6 +25,7 @@ then keeps the active sessions and a counter of new warnings visible.
 | Web | embedded Chromium (CEF) | default browser (`xdg-open`) |
 | External programs with placeholders | ✔ | ✔ (`{T} {PORT} {N} {U} {D} {P}`) |
 | Credentials, inheritance via folders | ✔ (per protocol) | ✔ (one set per folder) |
+| Credential manager | list, edit form, delete with confirmation | table with search, explicit save/revert, copy user/password, list of the connections and folders using a set |
 | Master / application password | ✔ | ✔ (Argon2id + ChaCha20-Poly1305) |
 | Properties dialog in the context menu of an entry | ✔ | ✔ |
 | Wake-on-LAN, reachability check | ✔ (`ping -t` window) | ✔ (dialog: `ping` and a TCP check of the port every 2 s) |

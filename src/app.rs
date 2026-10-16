@@ -322,6 +322,13 @@ pub struct App {
 
     show_credentials: bool,
     cred_selected: Option<Uuid>,
+    /// Working copy of the selected (or new) credentials in the credential manager.
+    cred_edit: Option<Credential>,
+    /// `cred_edit` is a new set that is not stored yet.
+    cred_new: bool,
+    cred_filter: String,
+    cred_show_password: bool,
+    cred_confirm_delete: Option<Uuid>,
     ask_credentials: Option<AskCredentials>,
     confirm_delete: Option<Sel>,
     import_dialog: Option<ImportDialog>,
@@ -397,6 +404,11 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             show_credentials: false,
             cred_selected: None,
+            cred_edit: None,
+            cred_new: false,
+            cred_filter: String::new(),
+            cred_show_password: false,
+            cred_confirm_delete: None,
             ask_credentials: None,
             confirm_delete: None,
             import_dialog: None,
@@ -1668,15 +1680,13 @@ impl App {
         let mut open = true;
         let (mut ok, mut apply, mut cancel) = (false, false, false);
         let max_h = ctx.screen_rect().height() * 0.85;
+        // Fixed size and centred like the original's dialog; long content scrolls.
         egui::Window::new(title)
             .id(egui::Id::new("properties_dialog"))
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
-            .default_size([640.0, 560.0f32.min(max_h)])
-            .max_height(max_h)
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
+            .fixed_size([640.0, 540.0f32.min(max_h)])
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 egui::TopBottomPanel::bottom("properties_buttons").show_inside(ui, |ui| {
                     ui.add_space(6.0);
@@ -1718,10 +1728,8 @@ impl App {
             .id(egui::Id::new("reachability_dialog"))
             .open(&mut open)
             .collapsible(false)
-            .resizable(true)
-            .default_size([620.0, 360.0])
-            .pivot(Align2::CENTER_CENTER)
-            .default_pos(ctx.screen_rect().center())
+            .fixed_size([620.0, 330.0])
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.label(format!("{} – port {} (TCP, every 2 s) and ping", r.host, r.port));
                 ui.add_space(4.0);
@@ -1981,87 +1989,285 @@ impl App {
         }
     }
 
+    /// The credentials still referring to a set: connections first, then folders.
+    fn credential_users(&self, id: Uuid) -> Vec<(Sel, String)> {
+        let mut users: Vec<(Sel, String)> = self
+            .data
+            .connections
+            .iter()
+            .filter(|c| c.credential == CredentialRef::Id(id))
+            .map(|c| (Sel::Connection(c.id), format!("{} {}", c.protocol.icon(), c.name)))
+            .collect();
+        users.sort_by_key(|(_, n)| n.to_lowercase());
+        let mut folders: Vec<(Sel, String)> =
+            self.data.folders.iter().filter(|f| f.credential == Some(id)).map(|f| (Sel::Folder(f.id), format!("🗀 {}", f.name))).collect();
+        folders.sort_by_key(|(_, n)| n.to_lowercase());
+        users.extend(folders);
+        users
+    }
+
+    /// Credential manager: list with search on the left, the selected set on the right.
+    /// Changes are kept in a working copy until "Save" (like the original's form); while it
+    /// has unsaved changes the selection cannot change, so nothing is lost or saved by accident.
     fn ui_credentials(&mut self, ctx: &egui::Context) {
         if !self.show_credentials {
             return;
         }
         let mut open = true;
-        let mut save: Option<Credential> = None;
-        let mut delete: Option<Uuid> = None;
-        egui::Window::new("Credentials").open(&mut open).default_width(580.0).show(ctx, |ui| {
-            if ui.button("➕ New").clicked() {
-                let c = Credential::new("New Credentials");
-                self.cred_selected = Some(c.id);
-                save = Some(c);
-            }
-            ui.add_space(4.0);
-            ui.columns(2, |cols| {
-                theme::list_frame(&mut cols[0], |ui| {
-                    egui::ScrollArea::vertical().id_salt("cred_list").max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
-                        let mut sorted: Vec<&Credential> = self.data.credentials.iter().collect();
-                        sorted.sort_by_key(|c| c.name.to_lowercase());
-                        for c in sorted {
-                            if ui.selectable_label(self.cred_selected == Some(c.id), c.display()).clicked() {
-                                self.cred_selected = Some(c.id);
+        let mut save = false;
+        let mut revert = false;
+        let mut select: Option<Uuid> = None;
+        let mut new: Option<Credential> = None;
+        let mut edit_user: Option<Sel> = None;
+        let stored = |app: &Self, id: Uuid| app.credential(id).cloned();
+        if self.cred_edit.is_none() && !self.cred_new {
+            self.cred_edit = self.cred_selected.and_then(|id| stored(self, id));
+        }
+        let dirty = match &self.cred_edit {
+            Some(e) => self.cred_new || stored(self, e.id).as_ref() != Some(e),
+            None => false,
+        };
+        // Fixed size and centred, like the original's form (a free window would open at a
+        // different place every time and move while its content changes).
+        egui::Window::new("Credentials")
+            .id(egui::Id::new("credential_manager"))
+            .open(&mut open)
+            .collapsible(false)
+            .fixed_size([860.0, 440.0])
+            .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!dirty, |ui| {
+                        if ui.button("➕ New").clicked() {
+                            new = Some(Credential::new(""));
+                        }
+                        let sel = self.cred_selected.and_then(|id| stored(self, id));
+                        if ui.add_enabled(sel.is_some(), egui::Button::new("🗐 Duplicate")).clicked() {
+                            if let Some(c) = sel.clone() {
+                                new = Some(Credential { id: Uuid::new_v4(), name: format!("{} (Copy)", c.name), ..c });
+                            }
+                        }
+                        if ui.add_enabled(sel.is_some(), egui::Button::new("🗑 Delete …")).clicked() {
+                            self.cred_confirm_delete = self.cred_selected;
+                        }
+                    });
+                    ui.separator();
+                    ui.add(egui::TextEdit::singleline(&mut self.cred_filter).hint_text("🔍 Search …").desired_width(200.0));
+                });
+                ui.add_space(4.0);
+                ui.columns(2, |cols| {
+                    // --- list
+                    let ui = &mut cols[0];
+                    let filter = self.cred_filter.trim().to_lowercase();
+                    let mut rows: Vec<(Credential, usize)> = self
+                        .data
+                        .credentials
+                        .iter()
+                        .filter(|c| {
+                            filter.is_empty() || [&c.name, &c.username, &c.domain].iter().any(|t| t.to_lowercase().contains(&filter))
+                        })
+                        .map(|c| (c.clone(), self.credential_users(c.id).len()))
+                        .collect();
+                    rows.sort_by_key(|(c, _)| c.name.to_lowercase());
+                    theme::list_frame(ui, |ui| {
+                        egui::ScrollArea::vertical().id_salt("cred_list").max_height(340.0).auto_shrink([false, false]).show(ui, |ui| {
+                            ui.add_enabled_ui(!dirty, |ui| {
+                                egui::Grid::new("cred_table").num_columns(4).spacing([12.0, 4.0]).show(ui, |ui| {
+                                    ui.label(RichText::new("Name").strong());
+                                    ui.label(RichText::new("User").strong());
+                                    ui.label(RichText::new("Domain").strong());
+                                    ui.label(RichText::new("Used").strong());
+                                    ui.end_row();
+                                    for (c, used) in &rows {
+                                        let selected = self.cred_selected == Some(c.id);
+                                        if ui.selectable_label(selected, &c.name).clicked() {
+                                            select = Some(c.id);
+                                        }
+                                        ui.label(&c.username);
+                                        ui.label(&c.domain);
+                                        ui.label(used.to_string());
+                                        ui.end_row();
+                                    }
+                                });
+                                if rows.is_empty() {
+                                    ui.label(RichText::new(if filter.is_empty() { "No credentials yet – ➕ New" } else { "No match" }).weak());
+                                }
+                            });
+                        });
+                    });
+                    // Always one line, so the window keeps its height (and position).
+                    ui.label(RichText::new(if dirty { "Save or revert the changes to select another entry." } else { " " }).weak());
+
+                    // --- details of the selected set
+                    let ui = &mut cols[1];
+                    let Some(mut c) = self.cred_edit.clone() else {
+                        ui.label(RichText::new("Select an entry or create a new one.").weak());
+                        return;
+                    };
+                    ui.heading(RichText::new(if c.name.trim().is_empty() { "New credentials".to_string() } else { c.name.clone() }).color(theme::accent(ui.visuals().dark_mode)));
+                    ui.add_space(6.0);
+                    egui::Grid::new("cred_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+                        ui.label("Name");
+                        ui.add(egui::TextEdit::singleline(&mut c.name).hint_text("e.g. Domain admin").desired_width(240.0));
+                        ui.end_row();
+                        ui.label("User");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut c.username).desired_width(240.0));
+                            if ui.add_enabled(!c.username.is_empty(), egui::Button::new("Copy").small()).on_hover_text("Copy the user name").clicked() {
+                                ui.ctx().copy_text(c.username.clone());
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Domain");
+                        ui.add(egui::TextEdit::singleline(&mut c.domain).hint_text("optional").desired_width(240.0));
+                        ui.end_row();
+                        ui.label("Password");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut c.password).password(!self.cred_show_password).desired_width(240.0));
+                            let eye = if self.cred_show_password { "Hide" } else { "Show" };
+                            if ui.add(egui::Button::new("👁").small().selected(self.cred_show_password)).on_hover_text(eye).clicked() {
+                                self.cred_show_password = !self.cred_show_password;
+                            }
+                            if ui.add_enabled(!c.password.is_empty(), egui::Button::new("Copy").small()).on_hover_text("Copy the password").clicked() {
+                                ui.ctx().copy_text(c.password.clone());
+                            }
+                        });
+                        ui.end_row();
+                    });
+                    // Hints that do not block saving, except a missing name.
+                    let name_missing = c.name.trim().is_empty();
+                    let duplicate = self.data.credentials.iter().any(|x| x.id != c.id && x.name.trim().eq_ignore_ascii_case(c.name.trim()));
+                    if name_missing {
+                        ui.colored_label(ui.visuals().warn_fg_color, "A name is required.");
+                    } else if duplicate {
+                        ui.colored_label(ui.visuals().warn_fg_color, "Another entry has the same name.");
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(dirty && !name_missing, egui::Button::new("💾 Save")).clicked() {
+                            save = true;
+                        }
+                        if ui.add_enabled(dirty, egui::Button::new(if self.cred_new { "Discard" } else { "Revert" })).clicked() {
+                            revert = true;
+                        }
+                    });
+                    ui.add_space(10.0);
+                    let users = if self.cred_new { Vec::new() } else { self.credential_users(c.id) };
+                    ui.label(RichText::new(format!("Used by {} connection(s)/folder(s)", users.len())).strong());
+                    egui::ScrollArea::vertical().id_salt("cred_users").max_height(120.0).show(ui, |ui| {
+                        for (sel, name) in &users {
+                            if ui.link(name).on_hover_text("Open the properties").clicked() {
+                                edit_user = Some(*sel);
                             }
                         }
                     });
+                    self.cred_edit = Some(c);
                 });
-                let ui = &mut cols[1];
-                if let Some(mut c) = self.cred_selected.and_then(|id| self.credential(id)).cloned() {
-                    let before = c.clone();
-                    egui::Grid::new("cred_grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                        ui.label("Name");
-                        ui.text_edit_singleline(&mut c.name);
-                        ui.end_row();
-                        ui.label("User");
-                        ui.text_edit_singleline(&mut c.username);
-                        ui.end_row();
-                        ui.label("Domain");
-                        ui.text_edit_singleline(&mut c.domain);
-                        ui.end_row();
-                        ui.label("Password");
-                        ui.add(egui::TextEdit::singleline(&mut c.password).password(true));
-                        ui.end_row();
-                    });
-                    let users = self.data.connections.iter().filter(|x| x.credential == CredentialRef::Id(c.id)).count()
-                        + self.data.folders.iter().filter(|x| x.credential == Some(c.id)).count();
-                    ui.label(RichText::new(format!("Used by {users} connection(s)/folder(s)")).weak());
-                    if c != before {
-                        save = Some(c.clone());
-                    }
-                    if ui.button("🗑 Delete").clicked() {
-                        delete = Some(c.id);
-                    }
-                }
             });
-        });
-        if let Some(c) = save {
-            if self.result(self.store.save_credential(&c)).is_some() {
-                match self.data.credentials.iter_mut().find(|x| x.id == c.id) {
-                    Some(x) => *x = c,
-                    None => self.data.credentials.push(c),
+
+        // Escape closes the manager when nothing is unsaved (and no dialog is on top).
+        if !dirty && self.cred_confirm_delete.is_none() && !ctx.memory(|m| m.any_popup_open()) && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
+        if save {
+            if let Some(c) = self.cred_edit.clone() {
+                let c = Credential { name: c.name.trim().to_string(), username: c.username.trim().to_string(), domain: c.domain.trim().to_string(), ..c };
+                if self.result(self.store.save_credential(&c)).is_some() {
+                    match self.data.credentials.iter_mut().find(|x| x.id == c.id) {
+                        Some(x) => *x = c.clone(),
+                        None => self.data.credentials.push(c.clone()),
+                    }
+                    self.push(Level::Info, format!("Credentials “{}” saved.", c.name));
+                    self.cred_selected = Some(c.id);
+                    self.cred_edit = Some(c);
+                    self.cred_new = false;
+                    // The properties dialog shows the credential names: refresh it.
+                    self.editor_original = self.editor.clone();
                 }
             }
         }
-        if let Some(id) = delete {
-            if self.result(self.store.delete_credential(id)).is_some() {
-                self.data.credentials.retain(|c| c.id != id);
-                for c in &mut self.data.connections {
-                    if c.credential == CredentialRef::Id(id) {
-                        c.credential = CredentialRef::None;
-                    }
-                }
-                for f in &mut self.data.folders {
-                    if f.credential == Some(id) {
-                        f.credential = None;
-                    }
-                }
-                self.cred_selected = None;
-                let sel = self.selection;
-                self.editor_original = self.editor.clone();
-                self.select(sel);
+        if revert {
+            if self.cred_new {
+                self.cred_new = false;
+                self.cred_edit = self.cred_selected.and_then(|id| stored(self, id));
+            } else {
+                self.cred_edit = self.cred_selected.and_then(|id| stored(self, id));
             }
+        }
+        if let Some(c) = new {
+            self.cred_selected = None;
+            self.cred_edit = Some(c);
+            self.cred_new = true;
+            self.cred_show_password = false;
+        }
+        if let Some(id) = select {
+            self.cred_selected = Some(id);
+            self.cred_edit = stored(self, id);
+            self.cred_new = false;
+            self.cred_show_password = false;
+        }
+
+        // Confirmation before deleting.
+        if let Some(id) = self.cred_confirm_delete {
+            let name = self.credential(id).map(|c| c.name.clone()).unwrap_or_default();
+            let used = self.credential_users(id).len();
+            let mut answer = None;
+            Self::modal("Delete Credentials").show(ctx, |ui| {
+                ui.label(format!("Delete the credentials “{name}”?"));
+                if used > 0 {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("{used} connection(s)/folder(s) use them and will have no credentials afterwards."),
+                    );
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        answer = Some(false);
+                    }
+                });
+            });
+            match answer {
+                Some(true) => {
+                    self.cred_confirm_delete = None;
+                    if self.result(self.store.delete_credential(id)).is_some() {
+                        self.data.credentials.retain(|c| c.id != id);
+                        for c in &mut self.data.connections {
+                            if c.credential == CredentialRef::Id(id) {
+                                c.credential = CredentialRef::None;
+                            }
+                        }
+                        for f in &mut self.data.folders {
+                            if f.credential == Some(id) {
+                                f.credential = None;
+                            }
+                        }
+                        self.push(Level::Info, format!("Credentials “{name}” deleted."));
+                        self.cred_selected = None;
+                        self.cred_edit = None;
+                        self.cred_new = false;
+                        let sel = self.selection;
+                        self.editor_original = self.editor.clone();
+                        self.select(sel);
+                    }
+                }
+                Some(false) => self.cred_confirm_delete = None,
+                None => {}
+            }
+        }
+
+        if let Some(sel) = edit_user {
+            self.select(Some(sel));
+            self.props_open = self.editor.is_some();
+        }
+        if !open {
+            // Closing drops unsaved changes (the window's ✖ is the "close" of the original).
+            self.cred_edit = None;
+            self.cred_new = false;
+            self.cred_confirm_delete = None;
+            self.cred_show_password = false;
         }
         self.show_credentials = open;
     }
@@ -2529,6 +2735,10 @@ impl App {
         self.quick_pending = None;
         self.show_credentials = false;
         self.cred_selected = None;
+        self.cred_edit = None;
+        self.cred_new = false;
+        self.cred_confirm_delete = None;
+        self.cred_show_password = false;
         self.master_dialog = None;
         self.import_dialog = None;
         self.rdp_import = None;

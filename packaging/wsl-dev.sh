@@ -89,6 +89,8 @@ cmd_gui() {
     cleanup() { kill "${PIDS[@]}" 2>/dev/null || true; rm -rf "$WORK"; }
     trap cleanup EXIT
     unset WAYLAND_DISPLAY
+    # Own settings (window size and positions, app.ron): the user's are left alone.
+    export XDG_DATA_HOME="$WORK/xdg-data"
     Xvfb :98 -screen 0 1280x800x24 >/dev/null 2>&1 & PIDS+=($!)
     Xvfb :99 -screen 0 1920x1200x24 >/dev/null 2>&1 & PIDS+=($!)
     sleep 2
@@ -121,6 +123,7 @@ cmd_gui() {
     echo "==> 3a: connected entry in the accent colour (folder Server unfolded)"
     xdotool mousemove 38 190 click 1; sleep 2
     import -window root "$out/3a-tree-connected.png"
+    xdotool mousemove 38 190 click 1; sleep 1          # fold it again (stored in the database)
     echo "==> 3c: sidebar collapsed, overlay on hover – the session stays visible"
     local w3; w3="$(xdotool search --name '^RC Manager$' | head -1)"
     xdotool mousemove 700 60 click 1; sleep 1          # keyboard to RC Manager (header)
@@ -157,6 +160,12 @@ cmd_gui() {
     xdotool mousemove 55 232 click 3; sleep 1
     xdotool mousemove 114 309 click 1; sleep 7       # "Check Reachability"
     import -window root "$out/6-reachability.png"
+    xdotool windowfocus "$wid"; xdotool key --window "$wid" Escape; sleep 1
+
+    echo "==> 7: credential manager – entry selected, list with usage"
+    xdotool mousemove 130 140 click 1; sleep 2       # 🔑 in the sidebar toolbar
+    xdotool mousemove 165 292 click 1; sleep 1       # "root"
+    import -window root "$out/7-credentials.png"
     kill $a; sleep 1
     echo "==> Screenshots: $out"
     ls "$out"
