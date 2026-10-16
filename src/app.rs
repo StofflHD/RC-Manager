@@ -15,6 +15,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// Full text of the GPL-3.0, shown in the About window (CR are dropped when shown: Windows
+/// checkouts may have CRLF line endings).
+const LICENSE: &str = include_str!("../LICENSE");
+
 /// Everything about the window that survives a restart (eframe storage).
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -27,11 +31,30 @@ struct Settings {
     auto_lock_minutes: u32,
     /// Open RDP, SSH/Telnet and VNC sessions as tabs inside the window (X11/XWayland).
     embed_sessions: bool,
+    /// Updater: check GitHub for a new version at start (at most once a day).
+    update_auto_check: bool,
+    /// Proxy for the updater, e.g. `http://proxy:3128` (empty = none).
+    update_proxy: String,
+    /// Unix time of the last automatic check.
+    update_last_check: i64,
+    /// Version the user chose to skip.
+    update_skip: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { dark: false, quick_protocol: Protocol::Rdp, sidebar_collapsed: false, log_hidden: false, auto_lock_minutes: 15, embed_sessions: true }
+        Self {
+            dark: false,
+            quick_protocol: Protocol::Rdp,
+            sidebar_collapsed: false,
+            log_hidden: false,
+            auto_lock_minutes: 15,
+            embed_sessions: true,
+            update_auto_check: true,
+            update_proxy: String::new(),
+            update_last_check: 0,
+            update_skip: String::new(),
+        }
     }
 }
 
@@ -115,6 +138,21 @@ fn certificate_of(details: &[String]) -> Option<(String, String)> {
     let thumb = details.iter().find_map(|l| l.trim().strip_prefix("Thumbprint:"))?;
     let fp: String = thumb.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase();
     (fp.len() == 64).then_some((host_port, fp))
+}
+
+enum UpdateState {
+    Checking,
+    UpToDate,
+    Available(crate::update::Release),
+    Installing,
+    Installed(PathBuf),
+    Error(String),
+}
+
+struct UpdateDlg {
+    state: UpdateState,
+    /// Opened from the menu (an automatic check only shows a found update).
+    manual: bool,
 }
 
 /// "HH:MM:SS UTC" of now.
@@ -303,6 +341,13 @@ pub struct App {
     active_tab: Option<u64>,
     /// The properties dialog for the selected entry is open.
     props_open: bool,
+    /// Updater: running check/download and its dialog.
+    update_rx: Option<Receiver<crate::update::Msg>>,
+    update: Option<UpdateDlg>,
+    /// "Updater Proxy" dialog (edited value).
+    update_proxy_edit: Option<String>,
+    /// AppImage to start once RC Manager has exited (restart after an update).
+    restart_exe: Option<PathBuf>,
     /// Running reachability check (dialog).
     reach: Option<Reachability>,
     /// Central area of the active session tab (points), set while drawing.
@@ -391,6 +436,10 @@ impl App {
             tabs: Vec::new(),
             active_tab: None,
             props_open: false,
+            update_rx: None,
+            update: None,
+            update_proxy_edit: None,
+            restart_exe: None,
             reach: None,
             session_rect: None,
             session_focus: None,
@@ -425,6 +474,12 @@ impl App {
         let freerdp_config = app.store.dir().join("freerdp");
         std::fs::remove_dir_all(&freerdp_config).ok();
         app.tools.freerdp_config = Some(freerdp_config);
+        // Automatic update check (at most once a day, in the background).
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        if app.s.update_auto_check && std::env::var_os("RC_MANAGER_NO_UPDATE").is_none() && now - app.s.update_last_check >= 86_400 {
+            app.s.update_last_check = now;
+            app.start_update_check(false);
+        }
         if app.tools.freerdp.is_none() {
             app.push(Level::Warn, "FreeRDP not found – RDP connections need it installed (Options → External Programs).");
         }
@@ -1034,6 +1089,16 @@ impl App {
                     }
                 });
                 ui.menu_button("Help", |ui| {
+                    if ui.button("Check for Updates …").clicked() {
+                        self.start_update_check(true);
+                        ui.close_menu();
+                    }
+                    ui.checkbox(&mut self.s.update_auto_check, "Check for Updates at Start");
+                    if ui.button("Updater Proxy …").clicked() {
+                        self.update_proxy_edit = Some(self.s.update_proxy.clone());
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("About RC Manager").clicked() {
                         self.show_about = true;
                         ui.close_menu();
@@ -1666,6 +1731,211 @@ impl App {
         });
     }
 
+    fn start_update_check(&mut self, manual: bool) {
+        if self.update_rx.is_some() {
+            if manual {
+                self.update.get_or_insert(UpdateDlg { state: UpdateState::Checking, manual });
+            }
+            return;
+        }
+        let (tx, rx) = channel();
+        let ctx = self.ctx.clone();
+        crate::update::spawn_check(self.s.update_proxy.clone(), tx, move || ctx.request_repaint());
+        self.update_rx = Some(rx);
+        if manual {
+            self.update = Some(UpdateDlg { state: UpdateState::Checking, manual });
+        }
+    }
+
+    fn start_update_install(&mut self, rel: crate::update::Release) {
+        let Some(target) = crate::update::running_appimage() else { return };
+        let (tx, rx) = channel();
+        let ctx = self.ctx.clone();
+        crate::update::spawn_install(rel, target, self.s.update_proxy.clone(), tx, move || ctx.request_repaint());
+        self.update_rx = Some(rx);
+        self.update = Some(UpdateDlg { state: UpdateState::Installing, manual: true });
+    }
+
+    fn poll_update(&mut self) {
+        let Some(rx) = &self.update_rx else { return };
+        let Ok(msg) = rx.try_recv() else { return };
+        self.update_rx = None;
+        let manual = self.update.as_ref().is_some_and(|u| u.manual);
+        let state = match msg {
+            crate::update::Msg::Checked(Ok(Some(rel))) if manual || rel.version != self.s.update_skip => {
+                self.push(Level::Info, format!("RC Manager {} is available.", rel.version));
+                Some(UpdateState::Available(rel))
+            }
+            crate::update::Msg::Checked(Ok(_)) => manual.then_some(UpdateState::UpToDate),
+            crate::update::Msg::Checked(Err(e)) => {
+                if !manual {
+                    self.push(Level::Warn, format!("Update check failed: {e}"));
+                }
+                manual.then_some(UpdateState::Error(e))
+            }
+            crate::update::Msg::Installed(Ok(p)) => {
+                self.push(Level::Info, format!("Update installed: {}", p.display()));
+                Some(UpdateState::Installed(p))
+            }
+            crate::update::Msg::Installed(Err(e)) => Some(UpdateState::Error(e)),
+        };
+        self.update = state.map(|state| UpdateDlg { state, manual });
+    }
+
+    fn open_url(&mut self, url: &str) {
+        match &self.tools.opener {
+            Some(o) => {
+                if let Err(e) = std::process::Command::new(o).arg(url).spawn() {
+                    self.push(Level::Warn, format!("Cannot open {url}: {e}"));
+                }
+            }
+            None => self.push(Level::Warn, format!("No browser found (xdg-open) – open {url} yourself.")),
+        }
+    }
+
+    /// The updater dialog (like notepad-rs) and the proxy setting.
+    fn ui_update(&mut self, ctx: &egui::Context) {
+        if let Some(mut proxy) = self.update_proxy_edit.take() {
+            let mut done = false;
+            Self::modal("Updater Proxy").show(ctx, |ui| {
+                ui.label("Proxy for update checks and downloads (empty = none):");
+                ui.add(egui::TextEdit::singleline(&mut proxy).hint_text("http://proxy:3128").desired_width(320.0));
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        self.s.update_proxy = proxy.trim().to_string();
+                        done = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        done = true;
+                    }
+                });
+            });
+            if !done && !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.update_proxy_edit = Some(proxy);
+            }
+        }
+        let Some(dlg) = self.update.take() else { return };
+        let mut keep = true;
+        // 1 install, 2 release page, 3 skip, 4 restart
+        let mut action: Option<u8> = None;
+        let current = env!("CARGO_PKG_VERSION");
+        let sessions = self.sessions.len();
+        Self::modal("Update RC Manager").show(ctx, |ui| {
+            ui.set_min_width(400.0);
+            ui.set_max_width(520.0);
+            match &dlg.state {
+                UpdateState::Checking => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Checking for updates …");
+                    });
+                }
+                UpdateState::Installing => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Downloading and verifying the update …");
+                    });
+                }
+                UpdateState::UpToDate => {
+                    ui.label(format!("RC Manager {current} is up to date."));
+                    if ui.button("OK").clicked() {
+                        keep = false;
+                    }
+                }
+                UpdateState::Available(rel) => {
+                    ui.label(RichText::new(format!("RC Manager {} is available (installed: {current}).", rel.version)).strong());
+                    if !rel.notes.trim().is_empty() {
+                        theme::list_frame(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                                ui.label(rel.notes.trim());
+                            });
+                        });
+                    }
+                    let appimage = crate::update::running_appimage();
+                    if appimage.is_none() {
+                        ui.label(RichText::new("Not started from an AppImage: download the new version from the release page.").weak());
+                    } else if rel.appimage.is_none() {
+                        ui.label(RichText::new("The release has no AppImage for this system.").weak());
+                    }
+                    ui.horizontal(|ui| {
+                        if appimage.is_some() && rel.appimage.is_some() && ui.button("Update now").clicked() {
+                            action = Some(1);
+                        }
+                        if ui.button("Open release page").clicked() {
+                            action = Some(2);
+                        }
+                        if ui.button("Later").clicked() {
+                            keep = false;
+                        }
+                        if ui.button("Skip this version").clicked() {
+                            action = Some(3);
+                        }
+                    });
+                }
+                UpdateState::Installed(p) => {
+                    ui.label("The update has been installed. It takes effect after a restart.");
+                    ui.label(RichText::new(p.display().to_string()).weak());
+                    if sessions > 0 {
+                        ui.colored_label(ui.visuals().warn_fg_color, format!("A restart closes the {sessions} open session(s)."));
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Restart now").clicked() {
+                            action = Some(4);
+                        }
+                        if ui.button("Later").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+                UpdateState::Error(e) => {
+                    ui.label(RichText::new("The update failed:").strong());
+                    ui.label(e);
+                    ui.horizontal(|ui| {
+                        if ui.button("Open release page").clicked() {
+                            action = Some(2);
+                        }
+                        if ui.button("OK").clicked() {
+                            keep = false;
+                        }
+                    });
+                }
+            }
+        });
+        let busy = matches!(dlg.state, UpdateState::Checking | UpdateState::Installing);
+        if !busy && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            keep = false;
+        }
+        match (action, &dlg.state) {
+            (Some(1), UpdateState::Available(rel)) => {
+                let rel = rel.clone();
+                self.start_update_install(rel);
+                return;
+            }
+            (Some(2), UpdateState::Available(rel)) => {
+                let page = rel.page.clone();
+                self.open_url(&page);
+                keep = false;
+            }
+            (Some(2), _) => {
+                self.open_url(&crate::update::releases_page());
+                keep = false;
+            }
+            (Some(3), UpdateState::Available(rel)) => {
+                self.s.update_skip = rel.version.clone();
+                keep = false;
+            }
+            (Some(4), UpdateState::Installed(p)) => {
+                self.restart_exe = Some(p.clone());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                keep = false;
+            }
+            _ => {}
+        }
+        if keep {
+            self.update = Some(dlg);
+        }
+    }
+
     /// Properties of the selected folder or connection, like the original's edit dialog.
     fn ui_properties(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         if !self.props_open || self.editor.is_none() {
@@ -1867,14 +2137,38 @@ impl App {
                 .resizable(false)
                 .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
+                    ui.set_max_width(520.0);
                     ui.vertical_centered(|ui| {
-                        ui.heading(format!("RC Manager {}", env!("CARGO_PKG_VERSION")));
+                        ui.label(
+                            RichText::new(format!("RC Manager {}", env!("CARGO_PKG_VERSION"))).heading().color(theme::accent(ui.visuals().dark_mode)),
+                        );
                         ui.label("Connection manager for RDP, SSH, Telnet, VNC, web and external programs.");
                         ui.label("Reads databases of the Windows RDP-Manager (Cinspiration, DB version 12).");
                         ui.label(RichText::new(format!("Data: {}", Store::default_dir().display())).weak());
+                        ui.hyperlink_to(format!("github.com/{}", crate::update::repo()), env!("CARGO_PKG_REPOSITORY"));
                         ui.add_space(10.0);
                         ui.separator();
                         ui.label(RichText::new(env!("CARGO_PKG_AUTHORS")).strong());
+                        ui.add_space(6.0);
+                        ui.label("License: GNU General Public License v3.0 or later");
+                        ui.label(
+                            RichText::new(
+                                "This program comes with ABSOLUTELY NO WARRANTY. It is free software: you can \
+                                 redistribute it and/or modify it under the terms of the GPL.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.hyperlink_to("gnu.org/licenses/gpl-3.0", "https://www.gnu.org/licenses/gpl-3.0.html");
+                    });
+                    ui.add_space(4.0);
+                    egui::CollapsingHeader::new("License Text").show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            // Wide enough for the 77 columns of the GPL text.
+                            ui.set_min_width(470.0);
+                            let text = RichText::new(LICENSE.replace('\r', "")).font(egui::FontId::monospace(10.0));
+                            ui.add(egui::Label::new(text).wrap());
+                        });
                     });
                 });
             self.show_about = open;
@@ -2890,6 +3184,8 @@ impl eframe::App for App {
         self.ui_editor(ctx, &mut actions);
         self.ui_properties(ctx, &mut actions);
         self.ui_reachability(ctx);
+        self.poll_update();
+        self.ui_update(ctx);
         self.ui_dialogs(ctx);
         for a in actions {
             self.apply(a);
@@ -2899,6 +3195,9 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         launch::cleanup_secret_files();
+        if let Some(exe) = self.restart_exe.take() {
+            crate::update::restart_when_exited(&exe);
+        }
         if !self.locked && self.editor_dirty() {
             self.save_editor();
         }

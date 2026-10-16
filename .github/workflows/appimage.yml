@@ -108,6 +108,8 @@ jobs:
       # shadow server (a clock and a terminal on it), RC Manager runs on :99 – and screenshots
       # of the certificate dialog, the RDP tab before/after resizing and an SSH tab.
       - name: GUI test (Xvfb, RDP shadow server)
+        env:
+          RC_MANAGER_NO_UPDATE: "1"
         run: |
           # The AppImage must not depend on the runner's xkbcommon-x11 (bundled instead).
           sudo dpkg -r --force-depends libxkbcommon-x11-0
@@ -220,7 +222,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" dist/RC-Manager-*-x86_64.AppImage \
+          # The updater only installs an AppImage whose SHA-256 matches this file.
+          (cd dist && sha256sum "RC-Manager-$VERSION-x86_64.AppImage" > "RC-Manager-$VERSION-x86_64.AppImage.sha256")
+          gh release create "$GITHUB_REF_NAME" dist/RC-Manager-*-x86_64.AppImage dist/RC-Manager-*-x86_64.AppImage.sha256 \
             --title "RC Manager $VERSION" \
             --prerelease \
             --notes "RC Manager $VERSION for Linux (x86_64, glibc ≥ 2.35, e.g. Ubuntu 22.04, Debian 12, Fedora 36 or newer).

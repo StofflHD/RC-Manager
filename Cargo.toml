@@ -4,7 +4,8 @@ version = "0.5.4"
 edition = "2021"
 description = "RC Manager – remote connection manager for RDP, SSH, VNC, web and external programs – Linux re-implementation of the Windows RDP-Manager"
 authors = ["© StofflHD and Claude"]
-license = "MIT"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/StofflHD/RC-Manager"
 
 [dependencies]
 # Pinned: the egui API changes between releases (same versions as the IP Calculator).
@@ -14,6 +15,8 @@ rusqlite = { version = "0.32.1", features = ["bundled"] }
 uuid = { version = "1.10.0", features = ["v4", "serde"] }
 serde = { version = "1.0.210", features = ["derive"] }
 serde_json = "1.0.128"
+# SHA-256 of downloaded updates (the updater shared with notepad-rs)
+sha2 = "0.10"
 anyhow = "1.0.89"
 dirs = "5.0.1"
 shell-words = "1.1.0"

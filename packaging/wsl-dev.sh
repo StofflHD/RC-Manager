@@ -91,6 +91,7 @@ cmd_gui() {
     unset WAYLAND_DISPLAY
     # Own settings (window size and positions, app.ron): the user's are left alone.
     export XDG_DATA_HOME="$WORK/xdg-data"
+    export RC_MANAGER_NO_UPDATE=1                   # no update check against GitHub
     Xvfb :98 -screen 0 1280x800x24 >/dev/null 2>&1 & PIDS+=($!)
     Xvfb :99 -screen 0 1920x1200x24 >/dev/null 2>&1 & PIDS+=($!)
     sleep 2

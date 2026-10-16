@@ -84,6 +84,16 @@ in separate windows), which every desktop has. It needs glibc ≥ 2.35 (Ubuntu 2
 If a bundled client cannot run on a system, RC Manager uses the installed one instead;
 `rc-manager --tools` (or *Options → External Programs*) shows which clients are used.
 
+### Updates
+
+RC Manager checks the GitHub releases at start (at most once a day; *Help → Check for Updates
+at Start* turns this off) and on *Help → Check for Updates …*. An update downloads the new
+AppImage next to the running one, installs it only if its SHA-256 matches the `.sha256` file of
+the release, replaces the old file (a version number in the file name is updated) and offers a
+restart. Downloads use `curl` or `wget`; *Help → Updater Proxy …* sets a proxy.
+`RC_MANAGER_NO_UPDATE=1` disables the automatic check. Without an AppImage (e.g. a self-built
+binary) the dialog links to the release page.
+
 ## Running without the AppImage
 
 Install the clients you need yourself:
@@ -218,6 +228,7 @@ src/vault.rs           password encryption
 src/launch.rs          starting FreeRDP, ssh, vncviewer, the browser
 src/embed.rs           X11 embedding of sessions into tabs
 src/net.rs             Wake-on-LAN, port check
+src/update.rs          updater (GitHub releases, SHA-256 check, replaces the AppImage)
 src/legacy/crypto.rs   .NET PasswordDeriveBytes + AES (passwords of the original)
 src/legacy/nrbf.rs     reader for .NET BinaryFormatter blobs (settings of the original)
 src/legacy/import.rs   import of the Windows database
@@ -226,3 +237,11 @@ packaging/             icon (SVG/PNG) and .desktop file (rc-manager.*)
 ```
 
 Tests: `cargo test` (reference values for the crypto and BinaryFormatter code were generated with .NET).
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE). The licence is also shown under *Help → About*.
+
+---
+
+© StofflHD and Claude

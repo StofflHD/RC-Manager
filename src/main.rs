@@ -8,6 +8,7 @@ mod model;
 mod net;
 mod store;
 mod theme;
+mod update;
 mod vault;
 
 use std::path::PathBuf;
