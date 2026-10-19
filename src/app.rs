@@ -64,6 +64,9 @@ enum Sel {
     Connection(Uuid),
 }
 
+// Folder and Connection differ a lot in size; Editor is short-lived UI state (one instance,
+// cloned only on edit), so boxing the larger variant would only add indirection.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq)]
 enum Editor {
     Folder(Folder),
@@ -255,6 +258,9 @@ impl Drop for Reachability {
     }
 }
 
+/// Geometry last given to a host window: (x, y, width, height, visible) and the cut-out holes.
+type Placement = ((i32, i32, u32, u32, bool), Vec<[i32; 4]>);
+
 /// A session shown as a tab; its client draws into the X11 window `host`.
 struct SessionTab {
     session: u64,
@@ -264,7 +270,7 @@ struct SessionTab {
     /// TigerVNC opens its own window, which is moved into the tab once it appears.
     adopt: Option<(u32, Instant)>,
     /// Last geometry given to the host (physical pixels) and whether it was visible.
-    placed: Option<((i32, i32, u32, u32, bool), Vec<[i32; 4]>)>,
+    placed: Option<Placement>,
     last_fit: Instant,
 }
 

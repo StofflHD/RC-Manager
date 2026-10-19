@@ -201,7 +201,7 @@ impl<'a> Reader<'a> {
         while items.len() < len {
             match self.record()? {
                 Rec::Value(v) => items.push(v),
-                Rec::Nulls(n) => items.extend(std::iter::repeat(Value::Null).take(n.min(len - items.len()))),
+                Rec::Nulls(n) => items.extend(std::iter::repeat_n(Value::Null, n.min(len - items.len()))),
                 Rec::End => bail!("MessageEnd inside an array"),
             }
         }
@@ -234,7 +234,7 @@ impl<'a> Reader<'a> {
                 self.class_values(id, &meta)?;
                 Rec::Value(Value::Ref(id))
             }
-            2 | 3 | 4 | 5 => {
+            2..=5 => {
                 let (id, name, members) = self.class_info()?;
                 let types = if kind == 4 || kind == 5 { Some(self.member_types(members.len())?) } else { None };
                 if kind == 3 || kind == 5 {
