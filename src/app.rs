@@ -79,6 +79,8 @@ enum Editor {
 enum Action {
     Select(Sel),
     Connect(Uuid),
+    /// Close the connection's existing session(s), then connect again (in-place reconnect).
+    Reconnect(Uuid),
     QuickConnect,
     NewFolder(Option<Uuid>),
     NewConnection(Option<Uuid>, Protocol),
@@ -694,6 +696,16 @@ impl App {
                 self.select(Some(Sel::Connection(id)));
                 self.connect(id);
             }
+            Action::Reconnect(id) => {
+                // Close the running session(s) for this connection first (cleanly, so the
+                // server-initiated takeover is not logged as an error), then connect again.
+                let open: Vec<u64> = self.sessions.iter().filter(|(_, s)| s.conn.id == id).map(|(sid, _)| *sid).collect();
+                for sid in open {
+                    self.stop_session(sid);
+                }
+                self.select(Some(Sel::Connection(id)));
+                self.connect(id);
+            }
             Action::QuickConnect => self.quick_connect(),
             Action::NewFolder(parent) => {
                 let f = Folder::new("New Folder", parent);
@@ -1161,7 +1173,7 @@ impl App {
         }
         r.context_menu(|ui| {
             if ui.button(if connected { "⟳ Reconnect" } else { "▶ Connect" }).clicked() {
-                actions.push(Action::Connect(c.id));
+                actions.push(if connected { Action::Reconnect(c.id) } else { Action::Connect(c.id) });
                 ui.close_menu();
             }
             if ui.button("✏ Properties …").clicked() {
@@ -1461,7 +1473,7 @@ impl App {
                     r.context_menu(|ui| {
                         if let Some(id) = t.connection {
                             if ui.button("⟳ Reconnect").clicked() {
-                                actions.push(Action::Connect(id));
+                                actions.push(Action::Reconnect(id));
                                 ui.close_menu();
                             }
                             if ui.button("✏ Properties …").clicked() {
