@@ -1571,7 +1571,15 @@ impl App {
                             }
                         });
                         ui.end_row();
+                        ui.label("Graphics");
+                        egui::ComboBox::from_id_salt("rdp_gfx").selected_text(o.graphics.label()).show_ui(ui, |ui| {
+                            for g in RdpGraphics::ALL {
+                                ui.selectable_value(&mut o.graphics, g, g.label());
+                            }
+                        });
+                        ui.end_row();
                     });
+                    ui.small("Graphics acceleration smooths photos and video. Use “Bitmap” only if the server does not support the newer modes.");
                     ui.checkbox(&mut o.dynamic_resolution, "Adapt the remote resolution to the window size")
                         .on_hover_text("Needs server support (Windows 8.1 / Server 2012 R2 or newer). When off, the desktop is scaled to the window.");
                 });
