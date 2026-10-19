@@ -90,10 +90,11 @@ if [ "${BUNDLE_TOOLS:-0}" = "1" ]; then
     done
     # linuxdeploy may replace AppRun; ours exports the bundle directory.
     install -m 755 "$ROOT/packaging/AppRun" "$APPDIR/AppRun"
-    # Licences of the bundled clients.
+    # Licences of the bundled clients. libopenh264 is linked into FreeRDP (WITH_OPENH264)
+    # and pulled in by linuxdeploy, so its BSD licence is shipped too.
     mkdir -p "$APPDIR/usr/share/doc/rc-manager"
     cp "$FREERDP_PREFIX/share/doc/freerdp-LICENSE" "$APPDIR/usr/share/doc/rc-manager/FreeRDP-LICENSE" 2>/dev/null || true
-    for pkg in tigervnc-viewer sshpass xterm; do
+    for pkg in tigervnc-viewer sshpass xterm libopenh264-dev; do
         [ -f "/usr/share/doc/$pkg/copyright" ] && cp "/usr/share/doc/$pkg/copyright" "$APPDIR/usr/share/doc/rc-manager/$pkg-copyright"
     done
 fi
