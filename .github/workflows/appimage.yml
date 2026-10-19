@@ -220,31 +220,6 @@ jobs:
           name: RC-Manager-AppImage
           path: dist/RC-Manager-*-x86_64.AppImage
 
-      - name: Publish "latest" build (every push to main)
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          APP="RC-Manager-$VERSION-x86_64.AppImage"
-          (cd dist && sha256sum "$APP" > "$APP.sha256")
-          # Rolling pre-release that always carries the newest main build; overwritten on every
-          # push. Its tag "latest" parses to version 0 in the updater, so the in-app updater
-          # never offers it – only the versioned v* releases count.
-          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-          gh release create latest "dist/$APP" "dist/$APP.sha256" \
-            --target "$GITHUB_SHA" \
-            --title "Latest main build ($VERSION)" \
-            --prerelease \
-            --notes "Automatischer Build vom aktuellen main-Stand ($VERSION, Commit \`${GITHUB_SHA:0:7}\`). Wird bei jedem Push auf main überschrieben.
-
-          **Hinweis:** Für den In-App-Updater zählen nur die versionierten \`v*\`-Releases. Dieses \"latest\"-Release ist nur zum direkten Ausprobieren des aktuellen Stands.
-
-          \`\`\`bash
-          chmod +x $APP
-          ./$APP
-          \`\`\`"
-
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
