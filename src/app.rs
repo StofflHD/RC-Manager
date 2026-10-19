@@ -1455,6 +1455,12 @@ impl App {
             .collect();
         let mut close = None;
         let mut activate = None;
+        // Drag to reorder: rectangles per tab (in list order), the tab being dragged and,
+        // on release, the move to apply to `self.tabs`.
+        let mut rects: Vec<egui::Rect> = Vec::new();
+        let mut dragging: Option<u64> = None;
+        let mut released: Option<u64> = None;
+        let mut reorder: Option<(usize, usize)> = None;
         egui::ScrollArea::horizontal().id_salt("session_tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
@@ -1464,7 +1470,16 @@ impl App {
                     }
                     let sel = self.active_tab == Some(t.session);
                     let text = RichText::new(format!("{} {}", t.icon, t.name));
-                    let r = ui.add(egui::SelectableLabel::new(sel, if sel { text.strong() } else { text }));
+                    // A stable id per session keeps the drag attached while the order changes.
+                    let r = ui.push_id(t.session, |ui| ui.add(egui::SelectableLabel::new(sel, if sel { text.strong() } else { text }))).inner;
+                    let r = r.interact(egui::Sense::click_and_drag());
+                    rects.push(r.rect);
+                    if r.dragged() {
+                        dragging = Some(t.session);
+                    }
+                    if r.drag_stopped() {
+                        released = Some(t.session);
+                    }
                     if r.clicked() {
                         activate = Some(t.session);
                     }
@@ -1506,8 +1521,37 @@ impl App {
                         close = Some(t.session);
                     }
                 }
+                // Drag-to-reorder feedback and the drop position (pointer vs the tab centres).
+                let pointer = ui.ctx().pointer_interact_pos();
+                let target_of = |p: egui::Pos2| rects.iter().position(|r| p.x < r.center().x).unwrap_or(rects.len());
+                if dragging.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    if let (Some(p), Some(first)) = (pointer, rects.first()) {
+                        let t = target_of(p);
+                        let x = if t == 0 { first.left() } else { rects.get(t - 1).map(|r| r.right()).unwrap_or(first.right()) };
+                        ui.painter().vline(x, first.y_range(), egui::Stroke::new(2.0_f32, theme::accent(self.s.dark)));
+                    }
+                }
+                if let (Some(session), Some(p)) = (released, pointer) {
+                    if let Some(from) = tabs.iter().position(|t| t.session == session) {
+                        let mut to = target_of(p);
+                        if from < to {
+                            to -= 1;
+                        }
+                        let to = to.min(tabs.len().saturating_sub(1));
+                        if to != from {
+                            reorder = Some((from, to));
+                        }
+                    }
+                }
             });
         });
+        if let Some((from, to)) = reorder {
+            if from < self.tabs.len() {
+                let tab = self.tabs.remove(from);
+                self.tabs.insert(to.min(self.tabs.len()), tab);
+            }
+        }
         if let Some(id) = activate {
             self.active_tab = Some(id);
             self.session_focus = None;
