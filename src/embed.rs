@@ -71,6 +71,8 @@ mod imp {
         /// Moves/resizes the host (physical pixels, relative to RC Manager's window) and
         /// makes every client window inside fill it. `holes` (relative to the host) are cut
         /// out of it, so RC Manager's own content shows (and gets the clicks) there.
+        // Position, size, visibility and holes are the natural parameters of an X11 placement.
+        #[allow(clippy::too_many_arguments)]
         pub fn place(&self, host: u32, x: i32, y: i32, w: u32, h: u32, visible: bool, holes: &[[i32; 4]]) -> Result<()> {
             let (w, h) = (w.max(1), h.max(1));
             self.conn.configure_window(host, &ConfigureWindowAux::new().x(x).y(y).width(w).height(h))?;

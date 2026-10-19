@@ -158,7 +158,7 @@ pub fn decrypt_aes_string(cipher_b64: &str, password: &str) -> Result<String> {
     if plain.len() % 2 != 0 {
         return Err(anyhow!("Plaintext is not UTF-16"));
     }
-    let units: Vec<u16> = plain.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let units: Vec<u16> = plain.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     String::from_utf16(&units).context("Plaintext is not valid UTF-16")
 }
 
