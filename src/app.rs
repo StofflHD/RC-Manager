@@ -39,6 +39,8 @@ struct Settings {
     update_last_check: i64,
     /// Version the user chose to skip.
     update_skip: String,
+    /// Connections whose sessions were open at the last exit, offered for reopening at start.
+    reopen: Vec<Uuid>,
 }
 
 impl Default for Settings {
@@ -54,6 +56,7 @@ impl Default for Settings {
             update_proxy: String::new(),
             update_last_check: 0,
             update_skip: String::new(),
+            reopen: Vec::new(),
         }
     }
 }
@@ -362,6 +365,8 @@ pub struct App {
     session_focus: Option<u64>,
     /// Connections to open at start (`--connect`).
     pending_connect: Vec<String>,
+    /// Sessions that were open at the last exit, offered for reopening once unlocked.
+    reopen_offer: Vec<Uuid>,
     prompts: VecDeque<PromptDialog>,
 
     log: VecDeque<LogLine>,
@@ -417,6 +422,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, tools: Tools, connect: Vec<String>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
         let s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
+        // Captured before `s` moves into the app; the sessions open at the last exit.
+        let reopen_offer = s.reopen.clone();
         let (events_tx, events_rx) = channel();
         let locked = store.has_master_password().unwrap_or(false);
         let mut app = Self {
@@ -450,6 +457,7 @@ impl App {
             session_rect: None,
             session_focus: None,
             pending_connect: connect,
+            reopen_offer,
             prompts: VecDeque::new(),
             log: VecDeque::new(),
             sessions: BTreeMap::new(),
@@ -2093,6 +2101,53 @@ impl App {
         egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0])
     }
 
+    /// Offers to reopen the sessions that were open when RC Manager last closed.
+    fn ui_reopen(&mut self, ctx: &egui::Context) {
+        if self.reopen_offer.is_empty() {
+            return;
+        }
+        // Only connections that still exist can be reopened.
+        let items: Vec<(Uuid, String)> =
+            self.reopen_offer.iter().filter_map(|id| self.connection(*id).map(|c| (*id, format!("{} {}", c.protocol.icon(), c.name)))).collect();
+        if items.is_empty() {
+            self.reopen_offer.clear();
+            return;
+        }
+        let mut reopen = false;
+        let mut dismiss = false;
+        Self::modal("Reopen Sessions").show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.label(format!("{} session(s) were open when RC Manager last closed:", items.len()));
+            theme::list_frame(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    for (_, name) in &items {
+                        ui.label(name);
+                    }
+                });
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button(format!("↻ Reopen {} session(s)", items.len())).clicked() {
+                    reopen = true;
+                }
+                if ui.button("Not now").clicked() {
+                    dismiss = true;
+                }
+            });
+        });
+        if !reopen && !dismiss && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            dismiss = true;
+        }
+        if reopen {
+            self.reopen_offer.clear();
+            for (id, _) in items {
+                self.connect(id);
+            }
+        } else if dismiss {
+            self.reopen_offer.clear();
+        }
+    }
+
     fn ui_dialogs(&mut self, ctx: &egui::Context) {
         if let Some(sel) = self.confirm_delete {
             let text = match sel {
@@ -2168,6 +2223,7 @@ impl App {
         }
 
         self.ui_prompt(ctx);
+        self.ui_reopen(ctx);
         self.ui_credentials(ctx);
         self.ui_import(ctx);
         self.ui_rdp_import(ctx);
@@ -3218,6 +3274,16 @@ impl App {
 
 impl eframe::App for App {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        // Remember the connections with an open session (deduped, only stored ones), so they
+        // can be offered for reopening next time. Recomputed on every save, including on exit.
+        let mut reopen = Vec::new();
+        for s in self.sessions.values() {
+            let id = s.conn.id;
+            if !id.is_nil() && self.connection(id).is_some() && !reopen.contains(&id) {
+                reopen.push(id);
+            }
+        }
+        self.s.reopen = reopen;
         eframe::set_value(storage, eframe::APP_KEY, &self.s);
     }
 
