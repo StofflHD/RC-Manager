@@ -93,6 +93,37 @@ impl WindowMode {
     }
 }
 
+/// How FreeRDP transfers the remote screen. Without the RDP8 graphics pipeline (`/gfx`)
+/// FreeRDP falls back to the legacy bitmap-update path, which paints the desktop in tiles
+/// and makes photos and video build up line by line. The pipeline (optionally with H.264)
+/// streams whole frames and is far smoother; it needs a server that supports it (Windows 8 /
+/// Server 2012 or newer) and falls back on its own on older servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RdpGraphics {
+    /// Graphics pipeline on, codec negotiated with the server (`/gfx`).
+    #[default]
+    Auto,
+    /// Graphics pipeline with H.264 (`/gfx:AVC444`) – smoothest for photos and video.
+    H264,
+    /// Classic RemoteFX codec (`/rfx`) – for servers without the graphics pipeline.
+    RemoteFx,
+    /// Legacy bitmap updates – most compatible, but the screen builds up in tiles.
+    Bitmap,
+}
+
+impl RdpGraphics {
+    pub const ALL: [RdpGraphics; 4] = [RdpGraphics::Auto, RdpGraphics::H264, RdpGraphics::RemoteFx, RdpGraphics::Bitmap];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RdpGraphics::Auto => "Automatic (graphics pipeline)",
+            RdpGraphics::H264 => "H.264 / AVC444 (video)",
+            RdpGraphics::RemoteFx => "RemoteFX",
+            RdpGraphics::Bitmap => "Bitmap (legacy, most compatible)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RdpOptions {
@@ -100,6 +131,8 @@ pub struct RdpOptions {
     /// e.g. "1920x1080"; empty = automatic/dynamic
     pub resolution: String,
     pub dynamic_resolution: bool,
+    /// How the remote screen is transferred (graphics pipeline / codec).
+    pub graphics: RdpGraphics,
     /// 0 = default
     pub color_depth: u8,
     pub clipboard: bool,
@@ -126,6 +159,7 @@ impl Default for RdpOptions {
             window_mode: WindowMode::Tab,
             resolution: String::new(),
             dynamic_resolution: true,
+            graphics: RdpGraphics::Auto,
             color_depth: 0,
             clipboard: true,
             sound: true,

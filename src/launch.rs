@@ -364,6 +364,15 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     if o.color_depth > 0 {
         a.push(format!("/bpp:{}", o.color_depth));
     }
+    // Graphics transfer: the RDP8 pipeline (`/gfx`) streams whole frames and is smooth;
+    // without it FreeRDP uses legacy bitmap updates, which build the screen up in tiles.
+    // `/gfx` falls back on its own on servers that do not support the pipeline.
+    match o.graphics {
+        RdpGraphics::Auto => a.push("/gfx".into()),
+        RdpGraphics::H264 => a.push("/gfx:AVC444".into()),
+        RdpGraphics::RemoteFx => a.push("/rfx".into()),
+        RdpGraphics::Bitmap => {}
+    }
     a.push(if o.clipboard { "+clipboard" } else { "-clipboard" }.into());
     if o.sound {
         a.push("/sound".into());
@@ -870,6 +879,29 @@ mod tests {
         assert!(lines.contains(&"/size:1280x720"));
         assert!(!lines.iter().any(|l| l.starts_with("/cert")), "certificate checks stay on and are asked in a dialog");
         assert!(!p.display.contains("pa ss"));
+    }
+
+    #[test]
+    fn graphics_pipeline_by_default() {
+        let mut c = Connection::new("Srv", Protocol::Rdp, None);
+        c.host = "srv".into();
+        // Default is the graphics pipeline, which replaces the line-by-line bitmap path.
+        let args = |p: &Plan| p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap().1.lines().map(str::to_string).collect::<Vec<_>>();
+        let p = plan(&c, None, &tools(3), None, None).unwrap();
+        assert!(args(&p).contains(&"/gfx".to_string()));
+
+        c.options.rdp.graphics = RdpGraphics::H264;
+        let p = plan(&c, None, &tools(3), None, None).unwrap();
+        assert!(args(&p).contains(&"/gfx:AVC444".to_string()));
+
+        c.options.rdp.graphics = RdpGraphics::RemoteFx;
+        let p = plan(&c, None, &tools(2), None, None).unwrap();
+        assert!(p.args.contains(&"/rfx".to_string()));
+
+        // Legacy bitmap: nothing is added, FreeRDP keeps its default.
+        c.options.rdp.graphics = RdpGraphics::Bitmap;
+        let p = plan(&c, None, &tools(2), None, None).unwrap();
+        assert!(!p.args.iter().any(|a| a.starts_with("/gfx") || a == "/rfx"));
     }
 
     #[test]
