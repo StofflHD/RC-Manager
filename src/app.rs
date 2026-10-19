@@ -9,7 +9,7 @@ use crate::store::{Data, Store};
 use crate::theme;
 use egui::{Align2, RichText};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -369,6 +369,8 @@ pub struct App {
     pending_connect: Vec<String>,
     /// Sessions that were open at the last exit, offered for reopening once unlocked.
     reopen_offer: Vec<Uuid>,
+    /// Which of the offered connections are ticked in the reopen dialog (None = not yet shown).
+    reopen_sel: Option<HashSet<Uuid>>,
     prompts: VecDeque<PromptDialog>,
 
     log: VecDeque<LogLine>,
@@ -460,6 +462,7 @@ impl App {
             session_focus: None,
             pending_connect: connect,
             reopen_offer,
+            reopen_sel: None,
             prompts: VecDeque::new(),
             log: VecDeque::new(),
             sessions: BTreeMap::new(),
@@ -2123,23 +2126,42 @@ impl App {
             self.reopen_offer.iter().filter_map(|id| self.connection(*id).map(|c| (*id, format!("{} {}", c.protocol.icon(), c.name)))).collect();
         if items.is_empty() {
             self.reopen_offer.clear();
+            self.reopen_sel = None;
             return;
         }
+        // Selection ticked per connection; starts with all selected (the original offers all).
+        let sel = self.reopen_sel.get_or_insert_with(|| items.iter().map(|(id, _)| *id).collect());
+        sel.retain(|id| items.iter().any(|(i, _)| i == id));
         let mut reopen = false;
         let mut dismiss = false;
         Self::modal("Reopen Sessions").show(ctx, |ui| {
             ui.set_max_width(420.0);
-            ui.label(format!("{} session(s) were open when RC Manager last closed:", items.len()));
+            ui.label(format!("{} session(s) were open when RC Manager last closed. Choose which to reopen:", items.len()));
             theme::list_frame(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                    for (_, name) in &items {
-                        ui.label(name);
+                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    for (id, name) in &items {
+                        let mut on = sel.contains(id);
+                        if ui.checkbox(&mut on, name).changed() {
+                            if on {
+                                sel.insert(*id);
+                            } else {
+                                sel.remove(id);
+                            }
+                        }
                     }
                 });
             });
+            let mut all = items.iter().all(|(id, _)| sel.contains(id));
+            if ui.checkbox(&mut all, "Select all").changed() {
+                match all {
+                    true => sel.extend(items.iter().map(|(id, _)| *id)),
+                    false => sel.clear(),
+                }
+            }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button(format!("↻ Reopen {} session(s)", items.len())).clicked() {
+                let n = sel.len();
+                if ui.add_enabled(n > 0, egui::Button::new(format!("↻ Reopen {n} session(s)"))).clicked() {
                     reopen = true;
                 }
                 if ui.button("Not now").clicked() {
@@ -2151,12 +2173,15 @@ impl App {
             dismiss = true;
         }
         if reopen {
+            let chosen: Vec<Uuid> = items.iter().filter(|(id, _)| sel.contains(id)).map(|(id, _)| *id).collect();
             self.reopen_offer.clear();
-            for (id, _) in items {
+            self.reopen_sel = None;
+            for id in chosen {
                 self.connect(id);
             }
         } else if dismiss {
             self.reopen_offer.clear();
+            self.reopen_sel = None;
         }
     }
 
