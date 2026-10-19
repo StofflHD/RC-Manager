@@ -1152,7 +1152,7 @@ impl App {
             actions.push(Action::Connect(c.id));
         }
         r.context_menu(|ui| {
-            if ui.button("▶ Connect").clicked() {
+            if ui.button(if connected { "⟳ Reconnect" } else { "▶ Connect" }).clicked() {
                 actions.push(Action::Connect(c.id));
                 ui.close_menu();
             }
@@ -1392,7 +1392,7 @@ impl App {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.session_rect = None;
             if !self.tabs.is_empty() {
-                self.tab_strip(ui);
+                self.tab_strip(ui, actions);
                 ui.add_space(2.0);
             }
             if !self.active_tab.is_some_and(|id| self.tabs.iter().any(|t| t.session == id)) {
@@ -1401,7 +1401,6 @@ impl App {
             match self.active_tab {
                 Some(id) => self.session_area(ui, id),
                 None => {
-                    let _ = actions;
                     ui.centered_and_justified(|ui| {
                         ui.label(
                             RichText::new("Double-click a connection to connect.\nRight-click an entry for its properties and more.").weak(),
@@ -1412,12 +1411,31 @@ impl App {
         });
     }
 
-    fn tab_strip(&mut self, ui: &mut egui::Ui) {
+    fn tab_strip(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
+        // Snapshot so the loop does not borrow `self` and can offer the connection's actions.
+        struct TabInfo {
+            session: u64,
+            icon: &'static str,
+            name: String,
+            /// The connection it belongs to, if it still exists (for the context menu).
+            connection: Option<Uuid>,
+            has_mac: bool,
+        }
+        let tabs: Vec<TabInfo> = self
+            .tabs
+            .iter()
+            .map(|t| {
+                let connection = self.sessions.get(&t.session).map(|s| s.conn.id).filter(|id| self.connection(*id).is_some());
+                let has_mac = connection.and_then(|id| self.connection(id)).is_some_and(|c| !c.mac.trim().is_empty());
+                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac }
+            })
+            .collect();
         let mut close = None;
+        let mut activate = None;
         egui::ScrollArea::horizontal().id_salt("session_tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for (i, t) in self.tabs.iter().enumerate() {
+                for (i, t) in tabs.iter().enumerate() {
                     if i > 0 {
                         ui.separator();
                     }
@@ -1425,18 +1443,52 @@ impl App {
                     let text = RichText::new(format!("{} {}", t.icon, t.name));
                     let r = ui.add(egui::SelectableLabel::new(sel, if sel { text.strong() } else { text }));
                     if r.clicked() {
-                        self.active_tab = Some(t.session);
-                        self.session_focus = None;
+                        activate = Some(t.session);
                     }
                     if r.middle_clicked() {
                         close = Some(t.session);
                     }
+                    // The connection's actions, like the tree's context menu; the session is
+                    // running, so "Connect" reads "Reconnect".
+                    r.context_menu(|ui| {
+                        if let Some(id) = t.connection {
+                            if ui.button("⟳ Reconnect").clicked() {
+                                actions.push(Action::Connect(id));
+                                ui.close_menu();
+                            }
+                            if ui.button("✏ Properties …").clicked() {
+                                actions.push(Action::Edit(Sel::Connection(id)));
+                                ui.close_menu();
+                            }
+                            if ui.button("Duplicate").clicked() {
+                                actions.push(Action::Duplicate(id));
+                                ui.close_menu();
+                            }
+                            if ui.button("Check Reachability").clicked() {
+                                actions.push(Action::CheckPort(id));
+                                ui.close_menu();
+                            }
+                            if ui.add_enabled(t.has_mac, egui::Button::new("Wake-on-LAN")).clicked() {
+                                actions.push(Action::Wake(id));
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                        }
+                        if ui.button("✖ Close session").clicked() {
+                            close = Some(t.session);
+                            ui.close_menu();
+                        }
+                    });
                     if ui.small_button("✖").on_hover_text("Close session").clicked() {
                         close = Some(t.session);
                     }
                 }
             });
         });
+        if let Some(id) = activate {
+            self.active_tab = Some(id);
+            self.session_focus = None;
+        }
         if let Some(id) = close {
             self.stop_session(id);
         }
