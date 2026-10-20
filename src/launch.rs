@@ -503,6 +503,15 @@ fn in_xterm(xterm: &str, e: &EmbedTarget, title: &str, cmd: Vec<String>) -> (Str
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // Paste the system clipboard (where RC Manager's "Copy" puts the password): by default
+    // xterm only pastes the PRIMARY selection (middle click / Shift+Insert), so a copied
+    // password could not be pasted. Bind Ctrl+Shift+V and Shift+Insert to the CLIPBOARD
+    // (PRIMARY as fallback), Ctrl+Shift+C to copy, and mirror selections to the clipboard.
+    let paste = "*VT100.translations: #override \
+Shift <Key>Insert: insert-selection(CLIPBOARD, PRIMARY)\\n\
+Ctrl Shift <Key>V: insert-selection(CLIPBOARD, PRIMARY)\\n\
+Ctrl Shift <Key>C: copy-selection(CLIPBOARD)";
+    args.extend(["-xrm", paste, "-xrm", "*selectToClipboard: true"].map(String::from));
     args.extend(["+sb", "-bc", "-e", "sh", "-c"].map(String::from));
     args.push(r#""$@"; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' $s; read _; fi"#.to_string());
     args.push("rc-manager".to_string());
