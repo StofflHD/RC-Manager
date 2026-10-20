@@ -91,6 +91,22 @@ enum Action {
     /// Opens the properties dialog of a folder or connection (the original's "Edit").
     Edit(Sel),
     SetExpanded(Uuid, bool),
+    /// Move a folder or connection into a folder (`None` = top level), via drag and drop.
+    Move(Sel, Option<Uuid>),
+}
+
+/// Drag-and-drop state for the connection tree, collected while it is drawn.
+#[derive(Default)]
+struct TreeDnd {
+    /// Off while searching or in the hover overlay.
+    enabled: bool,
+    /// The entry currently being dragged (this frame).
+    dragged: Option<Sel>,
+    /// The entry dropped (this frame).
+    released: Option<Sel>,
+    /// Drop zones in draw order: a row's rectangle and the folder a drop there targets
+    /// (a folder header targets itself, a connection row its parent folder; `None` = top level).
+    zones: Vec<(egui::Rect, Option<Uuid>)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -768,6 +784,57 @@ impl App {
                 }
             }
             Action::SetExpanded(id, open) => self.set_expanded(id, open),
+            Action::Move(sel, parent) => self.move_item(sel, parent),
+        }
+    }
+
+    /// Moves a folder or connection into `parent` (`None` = top level), persists it and keeps
+    /// the open editor in sync. Rejects moving a folder into itself or one of its descendants.
+    fn move_item(&mut self, sel: Sel, parent: Option<Uuid>) {
+        match sel {
+            Sel::Connection(id) => {
+                let Some(mut c) = self.connection(id).cloned() else { return };
+                if c.parent == parent {
+                    return;
+                }
+                c.parent = parent;
+                if self.result(self.store.save_connection(&c)).is_some() {
+                    if let Some(x) = self.data.connections.iter_mut().find(|x| x.id == id) {
+                        *x = c;
+                    }
+                }
+            }
+            Sel::Folder(id) => {
+                if parent == Some(id) {
+                    return;
+                }
+                // A folder must not move into its own subtree.
+                let (descendants, _) = self.descendants(id);
+                if parent.is_some_and(|p| descendants.contains(&p)) {
+                    return;
+                }
+                let Some(mut f) = self.folder(id).cloned() else { return };
+                if f.parent == parent {
+                    return;
+                }
+                f.parent = parent;
+                if self.result(self.store.save_folder(&f)).is_some() {
+                    if let Some(x) = self.data.folders.iter_mut().find(|x| x.id == id) {
+                        *x = f;
+                    }
+                }
+            }
+        }
+        if let Some(p) = parent {
+            self.set_expanded(p, true);
+        }
+        // Reflect the new parent in the open properties editor.
+        for ed in [&mut self.editor, &mut self.editor_original] {
+            match (ed, sel) {
+                (Some(Editor::Connection(e)), Sel::Connection(id)) if e.id == id => e.parent = parent,
+                (Some(Editor::Folder(e)), Sel::Folder(id)) if e.id == id => e.parent = parent,
+                _ => {}
+            }
         }
     }
 
@@ -1158,7 +1225,7 @@ impl App {
         });
     }
 
-    fn connection_row(&self, ui: &mut egui::Ui, c: &Connection, label: String, actions: &mut Vec<Action>) {
+    fn connection_row(&self, ui: &mut egui::Ui, c: &Connection, label: String, actions: &mut Vec<Action>, dnd: &mut TreeDnd) {
         let selected = self.selection == Some(Sel::Connection(c.id));
         // Connected systems are marked in the accent colour, as in the original.
         let connected = self.sessions.values().any(|s| s.conn.id == c.id);
@@ -1166,8 +1233,20 @@ impl App {
         if connected {
             text = text.color(theme::accent(ui.visuals().dark_mode)).strong();
         }
-        let r = ui.selectable_label(selected, text);
+        // A stable id per connection keeps the drag attached while the tree re-renders.
+        let r = ui.push_id(c.id, |ui| ui.selectable_label(selected, text)).inner;
         let r = if c.description.is_empty() { r.on_hover_text(&c.host) } else { r.on_hover_text(format!("{}\n\n{}", c.host, c.description)) };
+        let r = if dnd.enabled { r.interact(egui::Sense::click_and_drag()) } else { r };
+        if dnd.enabled {
+            if r.dragged() {
+                dnd.dragged = Some(Sel::Connection(c.id));
+            }
+            if r.drag_stopped() {
+                dnd.released = Some(Sel::Connection(c.id));
+            }
+            // Dropping onto a connection moves the dragged entry into that connection's folder.
+            dnd.zones.push((r.rect, c.parent));
+        }
         if r.clicked() {
             actions.push(Action::Select(Sel::Connection(c.id)));
         }
@@ -1203,7 +1282,7 @@ impl App {
         });
     }
 
-    fn folder_tree(&self, ui: &mut egui::Ui, parent: Option<Uuid>, actions: &mut Vec<Action>) {
+    fn folder_tree(&self, ui: &mut egui::Ui, parent: Option<Uuid>, actions: &mut Vec<Action>, dnd: &mut TreeDnd) {
         for f in self.children_folders(parent) {
             let id = ui.make_persistent_id(("folder", f.id));
             let state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, f.expanded);
@@ -1211,7 +1290,18 @@ impl App {
             let selected = self.selection == Some(Sel::Folder(f.id));
             state
                 .show_header(ui, |ui| {
-                    let r = ui.selectable_label(selected, format!("{} {}", if f.expanded { "🗁" } else { "🗀" }, f.name));
+                    let r = ui.push_id(f.id, |ui| ui.selectable_label(selected, format!("{} {}", if f.expanded { "🗁" } else { "🗀" }, f.name))).inner;
+                    let r = if dnd.enabled { r.interact(egui::Sense::click_and_drag()) } else { r };
+                    if dnd.enabled {
+                        if r.dragged() {
+                            dnd.dragged = Some(Sel::Folder(f.id));
+                        }
+                        if r.drag_stopped() {
+                            dnd.released = Some(Sel::Folder(f.id));
+                        }
+                        // Dropping onto a folder header moves the dragged entry into that folder.
+                        dnd.zones.push((r.rect, Some(f.id)));
+                    }
                     if r.clicked() {
                         actions.push(Action::Select(Sel::Folder(f.id)));
                     }
@@ -1232,14 +1322,14 @@ impl App {
                         }
                     });
                 })
-                .body(|ui| self.folder_tree(ui, Some(f.id), actions));
+                .body(|ui| self.folder_tree(ui, Some(f.id), actions, dnd));
             let now_open = egui::collapsing_header::CollapsingState::load(ui.ctx(), id).map(|s| s.is_open()).unwrap_or(was_open);
             if now_open != f.expanded {
                 actions.push(Action::SetExpanded(f.id, now_open));
             }
         }
         for c in self.children_connections(parent) {
-            self.connection_row(ui, c, c.name.clone(), actions);
+            self.connection_row(ui, c, c.name.clone(), actions, dnd);
         }
     }
 
@@ -1351,19 +1441,36 @@ impl App {
                 self.show_credentials = true;
             }
         });
+        let q = self.filter.trim().to_lowercase();
+        // Drag and drop to move entries between folders; off while searching or in the overlay.
+        let mut dnd = TreeDnd { enabled: q.is_empty() && !overlay, ..Default::default() };
         ui.add_space(4.0);
         theme::list_frame(ui, |ui| {
             ui.set_min_height(ui.available_height() - 6.0);
             egui::ScrollArea::vertical().id_salt(("tree_scroll", overlay)).auto_shrink([false; 2]).show(ui, |ui| {
-                let q = self.filter.trim().to_lowercase();
                 if q.is_empty() {
-                    self.folder_tree(ui, None, actions);
+                    self.folder_tree(ui, None, actions, &mut dnd);
                     if self.data.folders.is_empty() && self.data.connections.is_empty() {
                         ui.add_space(20.0);
                         ui.label(
                             RichText::new("No connections yet.\n\nCreate one via “Edit” or import a backup or database of the Windows RDP-Manager via “File”.")
                                 .weak(),
                         );
+                    }
+                    if dnd.enabled {
+                        let pointer = ui.ctx().pointer_interact_pos();
+                        let zone_at = |p: egui::Pos2| dnd.zones.iter().find(|(r, _)| r.contains(p)).map(|(r, parent)| (*r, *parent));
+                        if dnd.dragged.is_some() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            if let Some((rect, _)) = pointer.and_then(zone_at) {
+                                ui.painter().rect_stroke(rect, egui::Rounding::same(2.0), egui::Stroke::new(1.5_f32, theme::accent(self.s.dark)));
+                            }
+                        }
+                        // On release: into the folder under the pointer, or top level if over none.
+                        if let (Some(sel), Some(p)) = (dnd.released, pointer) {
+                            let parent = zone_at(p).map(|(_, parent)| parent).unwrap_or(None);
+                            actions.push(Action::Move(sel, parent));
+                        }
                     }
                 } else {
                     let mut hits: Vec<&Connection> = self
@@ -1376,7 +1483,7 @@ impl App {
                     for c in hits {
                         let path = self.folder_path(c.parent);
                         let label = if path.is_empty() { c.name.clone() } else { format!("{}   ({path})", c.name) };
-                        self.connection_row(ui, c, label, actions);
+                        self.connection_row(ui, c, label, actions, &mut dnd);
                     }
                 }
             });
