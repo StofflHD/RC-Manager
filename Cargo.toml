@@ -1,6 +1,6 @@
 [package]
 name = "rc-manager"
-version = "0.6.5"
+version = "0.6.6"
 edition = "2021"
 description = "RC Manager – remote connection manager for RDP, SSH, VNC, web and external programs – Linux re-implementation of the Windows RDP-Manager"
 authors = ["© StofflHD and Claude"]
