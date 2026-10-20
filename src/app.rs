@@ -293,6 +293,8 @@ struct SessionTab {
     /// Last geometry given to the host (physical pixels) and whether it was visible.
     placed: Option<Placement>,
     last_fit: Instant,
+    /// When the tab was opened; the periodic refit only runs for a short while after this.
+    opened: Instant,
 }
 
 /// Asks for credentials right before connecting.
@@ -981,6 +983,7 @@ impl App {
                         adopt: plan.adopt_window.then(|| (pid, Instant::now())),
                         placed: None,
                         last_fit: Instant::now(),
+                        opened: Instant::now(),
                     });
                     self.active_tab = Some(session);
                     self.session_focus = None;
@@ -3275,8 +3278,11 @@ impl App {
                 None => tab.placed.as_ref().map(|((x, y, w, h, _), _)| (*x, *y, *w, *h, false)).unwrap_or((0, 0, 1, 1, false)),
             };
             let state = (geom, holes);
-            // Clients create their window a moment after starting: fit them again now and then.
-            let refit = visible && tab.last_fit.elapsed() > Duration::from_millis(500);
+            // Clients create their window a moment after starting: refit for a few seconds so a
+            // late window still fills the tab. Afterwards only react to real geometry changes, so
+            // a steady re-place no longer interrupts an in-progress selection in the client.
+            let refit =
+                visible && tab.opened.elapsed() < Duration::from_secs(5) && tab.last_fit.elapsed() > Duration::from_millis(500);
             if tab.placed.as_ref() != Some(&state) || refit {
                 if let Err(e) = emb.place(tab.host, geom.0, geom.1, geom.2, geom.3, geom.4, &state.1) {
                     logs.push((Level::Warn, format!("{}: {e:#}", tab.name)));
