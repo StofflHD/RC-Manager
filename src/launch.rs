@@ -512,7 +512,9 @@ Shift <Key>Insert: insert-selection(CLIPBOARD, PRIMARY)\\n\
 Ctrl Shift <Key>V: insert-selection(CLIPBOARD, PRIMARY)\\n\
 Ctrl Shift <Key>C: copy-selection(CLIPBOARD)";
     args.extend(["-xrm", paste, "-xrm", "*selectToClipboard: true"].map(String::from));
-    args.extend(["+sb", "-bc", "-e", "sh", "-c"].map(String::from));
+    // Scrollback with a scrollbar so older output stays reachable and a selection can scroll
+    // past the visible area (needed to copy more than one screen); the wheel scrolls too.
+    args.extend(["-sb", "-sl", "100000", "-bc", "-e", "sh", "-c"].map(String::from));
     args.push(r#""$@"; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' $s; read _; fi"#.to_string());
     args.push("rc-manager".to_string());
     args.extend(cmd);
