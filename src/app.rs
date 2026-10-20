@@ -93,6 +93,8 @@ enum Action {
     SetExpanded(Uuid, bool),
     /// Move a folder or connection into a folder (`None` = top level), via drag and drop.
     Move(Sel, Option<Uuid>),
+    /// Copy the recorded history of a terminal session (by session id) to the clipboard.
+    CopySessionLog(u64),
 }
 
 /// Drag-and-drop state for the connection tree, collected while it is drawn.
@@ -135,6 +137,8 @@ struct Session {
     recent: VecDeque<String>,
     /// Ended by RC Manager (tab closed): the client's shutdown messages are not logged.
     closing: bool,
+    /// Terminal sessions: file the whole session is recorded to, for "copy/save history".
+    log: Option<PathBuf>,
 }
 
 /// A question of a client waiting on stdin, e.g. FreeRDP's certificate check.
@@ -787,6 +791,18 @@ impl App {
             }
             Action::SetExpanded(id, open) => self.set_expanded(id, open),
             Action::Move(sel, parent) => self.move_item(sel, parent),
+            Action::CopySessionLog(session) => {
+                let Some(log) = self.sessions.get(&session).and_then(|s| s.log.clone()) else { return };
+                match std::fs::read(&log) {
+                    Ok(raw) => {
+                        let text = launch::clean_typescript(&raw);
+                        let lines = text.lines().count();
+                        self.ctx.copy_text(text);
+                        self.push(Level::Info, format!("Session history copied to the clipboard ({lines} line(s))."));
+                    }
+                    Err(e) => self.push(Level::Warn, format!("Cannot read the session history: {e}")),
+                }
+            }
         }
     }
 
@@ -972,6 +988,7 @@ impl App {
                         stdin: spawned.stdin,
                         recent: VecDeque::new(),
                         closing: false,
+                        log: plan.session_log.clone(),
                     },
                 );
                 if let Some(t) = embed {
@@ -1091,6 +1108,9 @@ impl App {
                 }
                 Event::Exited { session, code } => {
                     if let Some(s) = self.sessions.remove(&session) {
+                        if let Some(log) = &s.log {
+                            std::fs::remove_file(log).ok();
+                        }
                         let dur = s.started.elapsed().as_secs();
                         if s.closing {
                             self.push(Level::Info, format!("[{session}] {} closed ({}m {}s).", s.name, dur / 60, dur % 60));
@@ -1553,14 +1573,18 @@ impl App {
             /// The connection it belongs to, if it still exists (for the context menu).
             connection: Option<Uuid>,
             has_mac: bool,
+            /// The session is recorded, so its history can be copied.
+            has_log: bool,
         }
         let tabs: Vec<TabInfo> = self
             .tabs
             .iter()
             .map(|t| {
-                let connection = self.sessions.get(&t.session).map(|s| s.conn.id).filter(|id| self.connection(*id).is_some());
+                let session = self.sessions.get(&t.session);
+                let connection = session.map(|s| s.conn.id).filter(|id| self.connection(*id).is_some());
                 let has_mac = connection.and_then(|id| self.connection(id)).is_some_and(|c| !c.mac.trim().is_empty());
-                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac }
+                let has_log = session.is_some_and(|s| s.log.is_some());
+                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac, has_log }
             })
             .collect();
         let mut close = None;
@@ -1621,6 +1645,10 @@ impl App {
                                 ui.close_menu();
                             }
                             ui.separator();
+                        }
+                        if t.has_log && ui.button("📋 Copy session history").on_hover_text("Copy the whole session output to the clipboard").clicked() {
+                            actions.push(Action::CopySessionLog(t.session));
+                            ui.close_menu();
                         }
                         if ui.button("✖ Close session").clicked() {
                             close = Some(t.session);

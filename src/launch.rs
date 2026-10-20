@@ -22,6 +22,9 @@ pub struct Tools {
     pub opener: Option<String>,
     /// xterm for SSH/Telnet sessions embedded in a tab (`-into`).
     pub xterm: Option<String>,
+    /// `script` (util-linux) records a terminal session to a file, so its whole history can be
+    /// copied or saved later.
+    pub script: Option<String>,
     pub home: String,
     /// Base directory for FreeRDP's configuration (`XDG_CONFIG_HOME`): every start gets a new,
     /// empty subdirectory that is deleted when FreeRDP exits. RC Manager keeps
@@ -157,6 +160,7 @@ impl Tools {
             vncviewer: bundled(&vnc_names, "-help").or_else(|| vnc_names.iter().find_map(|n| find_in_path(n))),
             opener: find_in_path("xdg-open"),
             xterm: bundled(&["xterm"], "-version").or_else(|| find_in_path("xterm")),
+            script: find_in_path("script"),
             home: dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
             freerdp_config: None,
         }
@@ -178,6 +182,7 @@ impl Tools {
             ("VNC (TigerVNC)", self.vncviewer.as_deref().map(label).unwrap_or_else(|| "not found – package tigervnc-viewer".into())),
             ("Browser (xdg-open)", show(&self.opener)),
             ("xterm (SSH in tabs)", show(&self.xterm)),
+            ("script (record session)", show(&self.script)),
         ];
         let missing = bundle_problems();
         if !missing.is_empty() {
@@ -213,6 +218,9 @@ pub struct Plan {
     pub warnings: Vec<String>,
     /// The client opens its own top-level window, which is moved into the tab (TigerVNC).
     pub adopt_window: bool,
+    /// Terminal sessions: file the whole session is recorded to (via `script`), so its history
+    /// can be copied or saved. Removed when the session ends.
+    pub session_log: Option<PathBuf>,
 }
 
 fn secret_path(tag: &str) -> PathBuf {
@@ -495,7 +503,7 @@ fn in_terminal(tools: &Tools, title: &str, cmd: Vec<String>) -> Result<(String, 
 }
 
 /// Runs a command in an xterm drawn into a tab, coloured like RC Manager's theme.
-fn in_xterm(xterm: &str, e: &EmbedTarget, title: &str, cmd: Vec<String>) -> (String, Vec<String>) {
+fn in_xterm(xterm: &str, e: &EmbedTarget, title: &str, cmd: Vec<String>, log: Option<(&str, &Path)>) -> (String, Vec<String>) {
     let hex = |c: egui::Color32| format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
     let (bg, fg) = crate::theme::session_colors(e.dark);
     let (bg, fg, cr) = (hex(bg), hex(fg), hex(crate::theme::accent(e.dark)));
@@ -514,10 +522,27 @@ Ctrl Shift <Key>C: copy-selection(CLIPBOARD)";
     args.extend(["-xrm", paste, "-xrm", "*selectToClipboard: true"].map(String::from));
     // Scrollback with a scrollbar so older output stays reachable and a selection can scroll
     // past the visible area (needed to copy more than one screen); the wheel scrolls too.
-    args.extend(["-sb", "-sl", "100000", "-bc", "-e", "sh", "-c"].map(String::from));
-    args.push(r#""$@"; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' $s; read _; fi"#.to_string());
-    args.push("rc-manager".to_string());
-    args.extend(cmd);
+    args.extend(["-sb", "-sl", "100000", "-bc"].map(String::from));
+    match log {
+        // Record the whole session to a typescript via util-linux `script`, so its complete
+        // history can be copied or saved regardless of what is still in the scrollback.
+        Some((script, logfile)) => {
+            let inner = format!(
+                r#"{}; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' "$s"; read _; fi"#,
+                shell_words::join(&cmd)
+            );
+            args.extend(["-e", script].map(String::from));
+            args.extend(["-q", "-f", "-c"].map(String::from));
+            args.push(inner);
+            args.push(logfile.to_string_lossy().into_owned());
+        }
+        None => {
+            args.extend(["-e", "sh", "-c"].map(String::from));
+            args.push(r#""$@"; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' $s; read _; fi"#.to_string());
+            args.push("rc-manager".to_string());
+            args.extend(cmd);
+        }
+    }
     (xterm.to_string(), args)
 }
 
@@ -570,12 +595,19 @@ fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, em
         }
     }
     plan.display = redact(&cmd, &[]);
+    // In a tab, record the session with `script` (if available) so its whole history can be
+    // exported later; separate windows keep the terminal's own buffer.
+    let log = match (embed, &tools.script) {
+        (Some(_), Some(_)) => Some(secret_path("session")),
+        _ => None,
+    };
     let (program, args) = match (embed, &tools.xterm) {
-        (Some(e), Some(xterm)) => in_xterm(xterm, e, &conn.name, cmd),
+        (Some(e), Some(xterm)) => in_xterm(xterm, e, &conn.name, cmd, tools.script.as_deref().zip(log.as_deref())),
         _ => in_terminal(tools, &conn.name, cmd)?,
     };
     plan.program = program;
     plan.args = args;
+    plan.session_log = log;
     Ok(plan)
 }
 
@@ -765,6 +797,51 @@ pub fn cleanup_secret_files() {
     remove_secret_files(&paths);
 }
 
+/// Turns a `script` typescript into readable text: drops ANSI/OSC escape sequences, carriage
+/// returns and other control characters, keeps printable text, tabs and line breaks. Full-screen
+/// programs (vim, htop) still leave their redraw artifacts, but ordinary shell output reads cleanly.
+pub fn clean_typescript(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                // CSI: parameters until a final byte in 0x40..=0x7e.
+                Some('[') => {
+                    for n in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                // OSC (e.g. window title): until BEL or the ST sequence ESC \.
+                Some(']') => {
+                    while let Some(n) = chars.next() {
+                        if n == '\x07' {
+                            break;
+                        }
+                        if n == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // Any other two-character escape: its second char is already consumed.
+                _ => {}
+            },
+            '\r' => {}
+            '\x08' => {
+                out.pop();
+            }
+            '\n' | '\t' => out.push(c),
+            c if (c as u32) < 0x20 => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Starts the planned process, forwards its output and cleans up secret files.
 /// Starts the planned process.
 pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() + Send + Clone + 'static) -> Result<Spawned> {
@@ -791,6 +868,11 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
             std::thread::sleep(Duration::from_secs(20));
             remove_secret_files(&later);
         });
+    }
+    // The session log lives for the whole session (no 20 s timer); register it so a leftover
+    // is still removed when the app exits.
+    if let Some(log) = &plan.session_log {
+        SECRET_FILES.lock().unwrap_or_else(|e| e.into_inner()).push(log.clone());
     }
 
     let mut cmd = Command::new(&plan.program);
@@ -860,9 +942,34 @@ mod tests {
             vncviewer: Some("/usr/bin/vncviewer".into()),
             opener: Some("/usr/bin/xdg-open".into()),
             xterm: Some("/usr/bin/xterm".into()),
+            script: None,
             home: "/home/test".into(),
             freerdp_config: Some("/home/test/.local/share/rc-manager/freerdp".into()),
         }
+    }
+
+    #[test]
+    fn typescript_is_cleaned() {
+        let raw = b"\x1b[32mhello\x1b[0m\r\nwo\x08orld\x1b]0;title\x07!\r\n";
+        assert_eq!(clean_typescript(raw), "hello\nworld!\n");
+    }
+
+    #[test]
+    fn ssh_in_xterm_records_a_session_log() {
+        let e = EmbedTarget { host: 4242, width: 1000, height: 700, dark: true };
+        let mut c = Connection::new("Box", Protocol::Ssh, None);
+        c.host = "box".into();
+        let mut t = tools(3);
+        t.script = Some("/usr/bin/script".into());
+        let p = plan(&c, None, &t, Some(&e), None).unwrap();
+        let log = p.session_log.clone().expect("a session log path");
+        assert_eq!(p.program, "/usr/bin/xterm");
+        // The session runs under `script`, writing the whole session to the log file.
+        assert!(p.args.windows(2).any(|w| w == ["-e", "/usr/bin/script"]), "{:?}", p.args);
+        assert_eq!(p.args.last().map(String::as_str), Some(log.to_string_lossy().as_ref()));
+        assert!(p.args.iter().any(|a| a.contains("ssh") && a.contains("-- box")), "ssh command is inside script -c: {:?}", p.args);
+        // Without `script` the session is not recorded.
+        assert!(plan(&c, None, &tools(3), Some(&e), None).unwrap().session_log.is_none());
     }
 
     fn cred() -> Credential {
