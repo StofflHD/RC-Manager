@@ -1377,8 +1377,7 @@ impl App {
     }
 
     fn ui_tree(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
-        // Skip the shortcut while a session owns the keyboard (see check_auto_lock).
-        if self.session_focus.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::B)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::B)) {
             self.s.sidebar_collapsed = !self.s.sidebar_collapsed;
             self.sidebar_peek = false;
         }
@@ -1967,8 +1966,7 @@ impl App {
     }
 
     fn ui_bottom(&mut self, ctx: &egui::Context) {
-        // Skip the shortcut while a session owns the keyboard (see check_auto_lock).
-        if self.session_focus.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::L)) {
             self.set_log_hidden(!self.s.log_hidden);
         }
         if !self.sessions.is_empty() {
@@ -3501,9 +3499,7 @@ impl App {
         if input {
             self.last_activity = Instant::now();
         }
-        // A focused session owns the keyboard; do not react to shortcuts while typing in it
-        // (egui still receives the keys, and a stale modifier could fire the lock on a plain "l").
-        if self.session_focus.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::L)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::L)) {
             self.lock_now("Locked.");
             return;
         }
