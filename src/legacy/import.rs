@@ -300,7 +300,12 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
         conn.sorting = get(&r, "sorting").parse().unwrap_or(0);
         conn.mac = get(&r, "mac").to_string();
         conn.last_connected = r.get("lastconnection").cloned();
-        conn.description = [get(&r, "description"), get(&r, "descriptionex")].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n\n");
+        // "DescriptionEx" is RTF in the original; turn it (and a plain description) into text.
+        conn.description = [rtf_to_text(get(&r, "description")), rtf_to_text(get(&r, "descriptionex"))]
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
 
         let target = get(&r, "target").trim().to_string();
         if protocol == Protocol::Web {
@@ -451,6 +456,81 @@ fn translate_putty(cmd: &str) -> PuttyCmd {
 /// The original's external-program placeholders (`ExtAppView.ParseArgs`) in RC Manager's syntax.
 fn translate_ext_placeholders(args: &str) -> String {
     args.replace("%target%", "{T}").replace("%hostname%", "{T}").replace("%name%", "{N}").replace("%username%", "{U}").replace("%password%", "{P}")
+}
+
+/// Converts RTF (how the Windows RDP-Manager stores a rich "DescriptionEx") to plain text.
+/// Font/colour tables and `\*` destinations are dropped, `\par`/`\line` become line breaks,
+/// `\tab` a tab, `\'xx` the byte. A string that is not RTF is returned unchanged.
+pub fn rtf_to_text(s: &str) -> String {
+    if !s.trim_start().starts_with("{\\rtf") {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut chars = s.trim_start().chars().peekable();
+    let mut depth = 0i32;
+    // >0 while inside an ignored destination group (font/colour table, `\*` …); its start depth.
+    let mut skip_at = 0i32;
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                if skip_at != 0 && depth <= skip_at {
+                    skip_at = 0;
+                }
+                depth -= 1;
+            }
+            '\\' => match chars.next() {
+                None => break,
+                Some(e @ ('\\' | '{' | '}')) => {
+                    if skip_at == 0 {
+                        out.push(e);
+                    }
+                }
+                Some('*') => {
+                    if skip_at == 0 {
+                        skip_at = depth;
+                    }
+                }
+                Some('\'') => {
+                    let hex: String = (0..2).filter_map(|_| chars.next()).collect();
+                    if let (0, Ok(b)) = (skip_at, u8::from_str_radix(&hex, 16)) {
+                        out.push(b as char);
+                    }
+                }
+                Some(a) if a.is_ascii_alphabetic() => {
+                    let mut word = String::from(a);
+                    while chars.peek().is_some_and(|n| n.is_ascii_alphabetic()) {
+                        word.push(chars.next().unwrap());
+                    }
+                    if chars.peek() == Some(&'-') {
+                        chars.next();
+                    }
+                    while chars.peek().is_some_and(|n| n.is_ascii_digit()) {
+                        chars.next();
+                    }
+                    if chars.peek() == Some(&' ') {
+                        chars.next();
+                    }
+                    if skip_at == 0 {
+                        match word.as_str() {
+                            "par" | "line" | "sect" => out.push('\n'),
+                            "tab" => out.push('\t'),
+                            "fonttbl" | "colortbl" | "stylesheet" | "info" | "pict" | "generator" => skip_at = depth,
+                            _ => {}
+                        }
+                    }
+                }
+                Some(_) => {}
+            },
+            '\r' | '\n' => {}
+            c => {
+                if skip_at == 0 {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out.trim().to_string()
 }
 
 fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warnings: &mut Vec<String>) {
@@ -663,5 +743,17 @@ mod tests {
     fn rejects_non_database() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/rdpsettings.bin");
         assert!(import(&path, None).is_err());
+    }
+
+    #[test]
+    fn rtf_becomes_plain_text() {
+        // An empty rich description (as the original writes it) becomes empty.
+        let empty = r"{\rtf1\ansi\ansicpg1252\deff0\deflang1031{\fonttbl{\f0\fnil\fcharset0 Microsoft Sans Serif;}}\viewkind4\uc1\pard\f0\fs17\par}";
+        assert_eq!(rtf_to_text(empty), "");
+        // Actual text with a line break and an accented character (\'e4 = ä).
+        let rich = r"{\rtf1\ansi{\fonttbl{\f0 Arial;}}\pard Line one\par Zweite Zeile mit \'e4\par}";
+        assert_eq!(rtf_to_text(rich), "Line one\nZweite Zeile mit ä");
+        // A plain-text description is left untouched.
+        assert_eq!(rtf_to_text("just a note"), "just a note");
     }
 }
