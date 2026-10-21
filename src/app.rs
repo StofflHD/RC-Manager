@@ -3284,7 +3284,26 @@ impl App {
                     logs.push((Level::Warn, format!("{}: the VNC window was not found; it stays a separate window.", tab.name)));
                 }
             }
-            let visible = Some(tab.session) == self.active_tab && rect.is_some() && !covered;
+            let active = Some(tab.session) == self.active_tab;
+            // A session can be shown when its area is known and nothing covers it (without SHAPE).
+            let show = rect.is_some() && !covered;
+            let visible = active && show;
+            // The active tab fills the session area; the others stay mapped at full size but just
+            // off-screen, so their client already connects and renders and is shown the instant
+            // the tab is selected (instead of only starting to connect once it becomes active).
+            let geom = match rect.filter(|_| show) {
+                Some(r) => {
+                    let (x, y) = ((r.min.x * ppp).round() as i32, (r.min.y * ppp).round() as i32);
+                    let (w, h) = ((r.width() * ppp).round().max(1.0) as u32, (r.height() * ppp).round().max(1.0) as u32);
+                    if active {
+                        (x, y, w, h, true)
+                    } else {
+                        (-(w as i32) - 100, y, w, h, true)
+                    }
+                }
+                None => tab.placed.as_ref().map(|((x, y, w, h, _), _)| (*x, *y, *w, *h, false)).unwrap_or((0, 0, 1, 1, false)),
+            };
+            // Only the active, on-screen tab needs cut-outs for menus/dialogs over it.
             let holes: Vec<[i32; 4]> = match rect.filter(|_| visible && shape) {
                 Some(r) => covers
                     .iter()
@@ -3297,22 +3316,12 @@ impl App {
                     .collect(),
                 None => Vec::new(),
             };
-            let geom = match rect.filter(|_| visible) {
-                Some(r) => (
-                    (r.min.x * ppp).round() as i32,
-                    (r.min.y * ppp).round() as i32,
-                    (r.width() * ppp).round().max(1.0) as u32,
-                    (r.height() * ppp).round().max(1.0) as u32,
-                    true,
-                ),
-                None => tab.placed.as_ref().map(|((x, y, w, h, _), _)| (*x, *y, *w, *h, false)).unwrap_or((0, 0, 1, 1, false)),
-            };
             let state = (geom, holes);
             // Clients create their window a moment after starting: refit for a few seconds so a
             // late window still fills the tab. Afterwards only react to real geometry changes, so
             // a steady re-place no longer interrupts an in-progress selection in the client.
             let refit =
-                visible && tab.opened.elapsed() < Duration::from_secs(5) && tab.last_fit.elapsed() > Duration::from_millis(500);
+                geom.4 && tab.opened.elapsed() < Duration::from_secs(5) && tab.last_fit.elapsed() > Duration::from_millis(500);
             if tab.placed.as_ref() != Some(&state) || refit {
                 if let Err(e) = emb.place(tab.host, geom.0, geom.1, geom.2, geom.3, geom.4, &state.1) {
                     logs.push((Level::Warn, format!("{}: {e:#}", tab.name)));
