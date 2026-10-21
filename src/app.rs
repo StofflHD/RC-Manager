@@ -1258,7 +1258,9 @@ impl App {
         }
         // A stable id per connection keeps the drag attached while the tree re-renders.
         let r = ui.push_id(c.id, |ui| ui.selectable_label(selected, text)).inner;
-        let r = if c.description.is_empty() { r.on_hover_text(&c.host) } else { r.on_hover_text(format!("{}\n\n{}", c.host, c.description)) };
+        // Older imports stored the description as RTF; show it as plain text.
+        let desc = legacy_import::rtf_to_text(&c.description);
+        let r = if desc.trim().is_empty() { r.on_hover_text(&c.host) } else { r.on_hover_text(format!("{}\n\n{}", c.host, desc)) };
         let r = if dnd.enabled { r.interact(egui::Sense::click_and_drag()) } else { r };
         if dnd.enabled {
             if r.dragged() {
