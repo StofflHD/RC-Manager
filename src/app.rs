@@ -3248,15 +3248,17 @@ impl App {
         }
         let ppp = ctx.pixels_per_point();
         let rect = if self.locked { None } else { self.session_rect };
-        // Menus, dialogs, tooltips and the sidebar overlay over the session: cut out of the
-        // session window (their shadows stay hidden), or hide it without SHAPE.
+        // Menus, dialogs and the sidebar overlay over the session: cut out of the session window
+        // (their shadows stay hidden), or hide it without SHAPE. Tooltips are excluded: they fade
+        // in and follow the hovered entry, so cutting a hole for them made the session flicker
+        // (e.g. hovering a host in the collapsed-sidebar overlay) for little benefit.
         let covers: Vec<egui::Rect> = rect
             .map(|r| {
                 ctx.memory(|m| {
                     m.areas()
                         .visible_layer_ids()
                         .into_iter()
-                        .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::PanelResizeLine))
+                        .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::PanelResizeLine | egui::Order::Tooltip))
                         .filter_map(|l| m.area_rect(l.id))
                         .map(|a| a.expand(1.0))
                         .filter(|a| a.intersects(r))
