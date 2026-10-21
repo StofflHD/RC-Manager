@@ -523,23 +523,18 @@ Ctrl Shift <Key>C: copy-selection(CLIPBOARD)";
     // Scrollback with a scrollbar so older output stays reachable and a selection can scroll
     // past the visible area (needed to copy more than one screen); the wheel scrolls too.
     args.extend(["-sb", "-sl", "100000", "-bc"].map(String::from));
+    // The tab closes when the session ends (the client's exit, e.g. the remote host closing the
+    // connection, exits the terminal). Errors stay visible in RC Manager's log panel.
     match log {
         // Record the whole session to a typescript via util-linux `script`, so its complete
         // history can be copied or saved regardless of what is still in the scrollback.
         Some((script, logfile)) => {
-            let inner = format!(
-                r#"{}; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' "$s"; read _; fi"#,
-                shell_words::join(&cmd)
-            );
-            args.extend(["-e", script].map(String::from));
-            args.extend(["-q", "-f", "-c"].map(String::from));
-            args.push(inner);
+            args.extend(["-e", script, "-q", "-f", "-c"].map(String::from));
+            args.push(shell_words::join(&cmd));
             args.push(logfile.to_string_lossy().into_owned());
         }
         None => {
-            args.extend(["-e", "sh", "-c"].map(String::from));
-            args.push(r#""$@"; s=$?; if [ $s -ne 0 ]; then printf '\n[Exited with code %s – press Enter to close] ' $s; read _; fi"#.to_string());
-            args.push("rc-manager".to_string());
+            args.push("-e".to_string());
             args.extend(cmd);
         }
     }
