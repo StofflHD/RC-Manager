@@ -328,12 +328,18 @@ enum Pick {
     Database,
     RdpFiles,
     RdpFolder,
+    /// Save dialog for exporting RC Manager's own database to a JSON file.
+    ExportDb,
+    /// Open dialog for importing an RC Manager export.
+    ImportDb,
 }
 
 /// Result of a native file dialog; `None` when it was cancelled.
 enum Picked {
     Database(PathBuf),
     Rdp(Vec<PathBuf>),
+    ExportTo(PathBuf),
+    ImportDb(PathBuf),
 }
 
 #[derive(Default)]
@@ -418,6 +424,8 @@ pub struct App {
     master_dialog: Option<MasterDialog>,
     show_tools: bool,
     show_about: bool,
+    /// Warning shown before exporting the database (the file holds passwords in clear text).
+    export_confirm: bool,
 }
 
 /// "YYYY-MM-DD HH:MM UTC" without pulling in a date library.
@@ -506,6 +514,7 @@ impl App {
             master_dialog: None,
             show_tools: false,
             show_about: false,
+            export_confirm: false,
         };
         if !locked {
             app.try_unlock(None);
@@ -1154,6 +1163,15 @@ impl App {
                     }
                     if ui.button("Import .rdp Files …").clicked() {
                         self.rdp_import = Some(RdpImportDialog { files: Vec::new(), folder: self.current_folder() });
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Export Database …").on_hover_text("Save all connections, folders and credentials to a file").clicked() {
+                        self.export_confirm = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Import Database (RC Manager export) …").clicked() {
+                        self.pick(Pick::ImportDb);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -2298,6 +2316,33 @@ impl App {
         egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0])
     }
 
+    /// Warns before exporting, because the file contains passwords in clear text.
+    fn ui_export(&mut self, ctx: &egui::Context) {
+        if !self.export_confirm {
+            return;
+        }
+        let mut close = false;
+        Self::modal("Export Database").show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.label("This exports all connections, folders and credentials to a file you can import again or move to another machine.");
+            ui.add_space(4.0);
+            ui.colored_label(ui.visuals().warn_fg_color, "The file contains the stored passwords in clear text. Keep it in a safe place.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Choose file …").clicked() {
+                    self.pick(Pick::ExportDb);
+                    close = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.export_confirm = false;
+        }
+    }
+
     /// Offers to reopen the sessions that were open when RC Manager last closed.
     fn ui_reopen(&mut self, ctx: &egui::Context) {
         if self.reopen_offer.is_empty() {
@@ -2446,6 +2491,7 @@ impl App {
         self.ui_credentials(ctx);
         self.ui_import(ctx);
         self.ui_rdp_import(ctx);
+        self.ui_export(ctx);
         self.ui_master(ctx);
 
         if self.show_tools {
@@ -2947,6 +2993,18 @@ impl App {
                     files.sort();
                     Picked::Rdp(files)
                 }),
+                Pick::ExportDb => dialog
+                    .set_title("Export the RC Manager database to a file")
+                    .set_file_name("rc-manager-export.json")
+                    .add_filter("RC Manager export", &["json"])
+                    .save_file()
+                    .map(Picked::ExportTo),
+                Pick::ImportDb => dialog
+                    .set_title("Import an RC Manager export")
+                    .add_filter("RC Manager export", &["json"])
+                    .add_filter("All files", &["*"])
+                    .pick_file()
+                    .map(Picked::ImportDb),
             };
             tx.send(picked).ok();
             ctx.request_repaint();
@@ -2975,6 +3033,43 @@ impl App {
                     d.files = files;
                 }
             }
+            Some(Picked::ExportTo(mut path)) => {
+                if path.extension().is_none() {
+                    path.set_extension("json");
+                }
+                match crate::store::export_json(&self.data) {
+                    // The file holds passwords in clear text, so it is written readable only by
+                    // the current user (mode 0600).
+                    Ok(json) => match crate::vault::write_private(&path, json.as_bytes()) {
+                        Ok(()) => self.push(
+                            Level::Info,
+                            format!(
+                                "Exported {} connection(s), {} folder(s) and {} credential(s) to {} (contains passwords in clear text).",
+                                self.data.connections.len(),
+                                self.data.folders.len(),
+                                self.data.credentials.len(),
+                                path.display()
+                            ),
+                        ),
+                        Err(e) => self.push(Level::Error, format!("Export failed: {e:#}")),
+                    },
+                    Err(e) => self.push(Level::Error, format!("Export failed: {e:#}")),
+                }
+            }
+            Some(Picked::ImportDb(path)) => match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| crate::store::import_json(&t).map_err(|e| format!("{e:#}"))) {
+                Ok(data) => {
+                    let (nf, nc, nk) = (data.folders.len(), data.connections.len(), data.credentials.len());
+                    if self.result(self.store.save_all(&data)).is_some() {
+                        if let Some(d) = self.result(self.store.load()) {
+                            self.data = d;
+                        }
+                        self.editor_original = self.editor.clone();
+                        self.select(None);
+                        self.push(Level::Info, format!("Imported {nc} connection(s), {nf} folder(s) and {nk} credential(s)."));
+                    }
+                }
+                Err(e) => self.push(Level::Error, format!("Import failed: {e}")),
+            },
             None => {}
         }
     }

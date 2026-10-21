@@ -4,6 +4,7 @@ use crate::model::*;
 use crate::vault::{self, Vault};
 use anyhow::{anyhow, bail, Result};
 use rusqlite::{params, Connection as Db, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -58,6 +59,44 @@ pub struct Data {
     pub folders: Vec<Folder>,
     pub connections: Vec<Connection>,
     pub credentials: Vec<Credential>,
+}
+
+/// Marker in exported files so an import can recognise them.
+const EXPORT_FORMAT: &str = "rc-manager-export";
+
+/// A portable copy of the whole database (folders, connections and credentials with their
+/// passwords in clear text). Written on export, read on import.
+#[derive(Serialize, Deserialize)]
+struct Export {
+    format: String,
+    version: u32,
+    #[serde(default)]
+    folders: Vec<Folder>,
+    #[serde(default)]
+    connections: Vec<Connection>,
+    #[serde(default)]
+    credentials: Vec<Credential>,
+}
+
+/// Serialises the data to the export JSON (contains passwords in clear text).
+pub fn export_json(data: &Data) -> Result<String> {
+    let e = Export {
+        format: EXPORT_FORMAT.to_string(),
+        version: 1,
+        folders: data.folders.clone(),
+        connections: data.connections.clone(),
+        credentials: data.credentials.clone(),
+    };
+    Ok(serde_json::to_string_pretty(&e)?)
+}
+
+/// Parses an export JSON back into data; rejects anything that is not an RC Manager export.
+pub fn import_json(text: &str) -> Result<Data> {
+    let e: Export = serde_json::from_str(text).map_err(|err| anyhow!("Not a valid RC Manager export: {err}"))?;
+    if e.format != EXPORT_FORMAT {
+        bail!("Not an RC Manager export (format \"{}\").", e.format);
+    }
+    Ok(Data { folders: e.folders, connections: e.connections, credentials: e.credentials })
 }
 
 fn uuid_opt(s: Option<String>) -> Option<Uuid> {
@@ -445,5 +484,27 @@ mod tests {
         s.delete_credential(cred.id).unwrap();
         assert_eq!(s.load().unwrap().connections[0].credential, CredentialRef::Inherit);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn export_import_round_trip() {
+        let f = Folder::new("Customers", None);
+        let mut cred = Credential::new("Admin");
+        cred.username = "administrator".into();
+        cred.password = "S3cret!".into();
+        let mut c = Connection::new("Server 1", Protocol::Rdp, Some(f.id));
+        c.host = "srv1.example.org".into();
+        c.credential = CredentialRef::Id(cred.id);
+        let data = Data { folders: vec![f], connections: vec![c], credentials: vec![cred] };
+
+        let json = export_json(&data).unwrap();
+        let back = import_json(&json).unwrap();
+        assert_eq!(back.folders, data.folders);
+        assert_eq!(back.connections, data.connections);
+        assert_eq!(back.credentials, data.credentials);
+        assert_eq!(back.credentials[0].password, "S3cret!");
+        // Not an export → rejected.
+        assert!(import_json("{}").is_err());
+        assert!(import_json(r#"{"format":"something-else","version":1}"#).is_err());
     }
 }

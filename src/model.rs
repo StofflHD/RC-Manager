@@ -216,7 +216,7 @@ pub struct ProtocolOptions {
     pub external: ExternalOptions,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Folder {
     pub id: Uuid,
     pub parent: Option<Uuid>,
@@ -234,7 +234,7 @@ impl Folder {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Connection {
     pub id: Uuid,
     pub parent: Option<Uuid>,
@@ -278,7 +278,7 @@ impl Connection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Credential {
     pub id: Uuid,
     pub name: String,
