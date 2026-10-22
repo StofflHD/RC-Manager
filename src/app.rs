@@ -29,7 +29,7 @@ struct Settings {
     log_hidden: bool,
     /// Minutes of inactivity before the app locks itself (only with a master password; 0 = never).
     auto_lock_minutes: u32,
-    /// Open RDP, SSH/Telnet and VNC sessions as tabs inside the window (X11/XWayland).
+    /// Open RDP, SSH and VNC sessions as tabs inside the window (X11/XWayland).
     embed_sessions: bool,
     /// Updater: check GitHub for a new version at start (at most once a day).
     update_auto_check: bool,
@@ -937,7 +937,7 @@ impl App {
         let emb = self.embedder.as_ref()?;
         let wanted = match conn.protocol {
             Protocol::Rdp => conn.options.rdp.window_mode == WindowMode::Tab,
-            Protocol::Ssh | Protocol::Telnet => self.tools.xterm.is_some(),
+            Protocol::Ssh => self.tools.xterm.is_some(),
             Protocol::Vnc => self.tools.vncviewer.is_some() && emb.can_adopt(),
             Protocol::Web | Protocol::External => false,
         };
@@ -1256,7 +1256,7 @@ impl App {
                         actions.push(Action::QuickConnect);
                     }
                     egui::ComboBox::from_id_salt("quick_proto").selected_text(self.s.quick_protocol.label()).show_ui(ui, |ui| {
-                        for p in [Protocol::Rdp, Protocol::Ssh, Protocol::Telnet, Protocol::Vnc, Protocol::Web] {
+                        for p in [Protocol::Rdp, Protocol::Ssh, Protocol::Vnc, Protocol::Web] {
                             ui.selectable_value(&mut self.s.quick_protocol, p, p.label());
                         }
                     });
@@ -1440,7 +1440,10 @@ impl App {
                 || overlay_rect.contains(p)
                 || ctx.layer_id_at(p).is_some_and(|l| l.order == egui::Order::Foreground && l.id != area.response.layer_id.id)
         });
-        let menu_open = ctx.memory(|m| m.any_popup_open());
+        // A context menu does not register as a popup (any_popup_open only covers combo boxes and
+        // the like), so check it separately – otherwise moving onto a host's context menu hid the
+        // overlay and closed the menu with it, which looked like flicker.
+        let menu_open = ctx.memory(|m| m.any_popup_open()) || ctx.is_context_menu_open();
         if !keep && !menu_open {
             self.sidebar_peek = false;
         }
@@ -1948,7 +1951,7 @@ impl App {
                     ui.label(RichText::new("Placeholders: {T} host, {PORT} port, {N} name, {U} user, {D} domain, {P} password").weak());
                 });
             }
-            Protocol::Telnet | Protocol::Web => {}
+            Protocol::Web => {}
         }
     }
 
@@ -2531,7 +2534,7 @@ impl App {
                         ui.label(
                             RichText::new(format!("RC Manager {}", env!("CARGO_PKG_VERSION"))).heading().color(theme::accent(ui.visuals().dark_mode)),
                         );
-                        ui.label("Connection manager for RDP, SSH, Telnet, VNC, web and external programs.");
+                        ui.label("Connection manager for RDP, SSH, VNC, web and external programs.");
                         ui.label("Reads databases of the Windows RDP-Manager (Cinspiration, DB version 12).");
                         ui.label(RichText::new(format!("Data: {}", Store::default_dir().display())).weak());
                         ui.hyperlink_to(format!("github.com/{}", crate::update::repo()), env!("CARGO_PKG_REPOSITORY"));

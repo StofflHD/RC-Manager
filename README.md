@@ -19,7 +19,7 @@ then keeps the active sessions and a counter of new warnings visible.
 | Folder tree, search, sort order | ✔ | ✔ |
 | Sessions as tabs, scaled with the window | ✔ | ✔ (X11/XWayland) |
 | RDP | embedded MSTSC ActiveX | FreeRDP 3 drawn into the tab; remote resolution follows the tab or the desktop is scaled |
-| SSH / Telnet | embedded PuTTY | `ssh`/`telnet` in an xterm inside the tab, password via `sshpass` |
+| SSH | embedded PuTTY | `ssh` in an xterm inside the tab, password via `sshpass` |
 | VNC | UltraVNC/TightVNC | TigerVNC `vncviewer`, its window moved into the tab |
 | Certificate check | warning dialog (default: none) | dialog with details; trusted fingerprints are remembered |
 | Web | embedded Chromium (CEF) | default browser (`xdg-open`) |
@@ -37,14 +37,14 @@ then keeps the active sessions and a counter of new warnings visible.
 
 ## Sessions in tabs
 
-RDP, SSH/Telnet and VNC sessions open as tabs next to the connection properties and follow
+RDP, SSH and VNC sessions open as tabs next to the connection properties and follow
 the window size, like in the original:
 
 * **RDP** – FreeRDP draws into the tab (`/parent-window`). With *Display → Adapt the remote
   resolution to the window size* (default) the remote desktop gets the size of the tab and
   follows every resize (needs Windows 8.1 / Server 2012 R2 or newer); without it, the desktop
   (fixed resolution or the tab size) is scaled into the tab.
-* **SSH/Telnet** – an xterm inside the tab, coloured like the light or dark theme.
+* **SSH** – an xterm inside the tab, coloured like the light or dark theme.
 * **VNC** – TigerVNC's window is moved into the tab; the remote desktop is resized if the
   server supports it, otherwise shown centred (TigerVNC cannot scale).
 
@@ -162,7 +162,7 @@ Desktop integration without AppImage: copy `packaging/rc-manager.desktop` to
 rc-manager --import ~/RDP_Manager_2026.04.22.zip [--app-password SECRET]
 ```
 
-Imported are folders, connections (RDP, PuTTY → SSH/Telnet, VNC, web, external programs),
+Imported are folders, connections (RDP, PuTTY → SSH, VNC, web, external programs),
 credentials including passwords, as well as port, resolution, colour depth, redirections and
 gateway from the settings – also when they are inherited from folders. Deleted entries (recycle
 bin) are skipped. From a backup the import dialog shows version, date and comment, and the
@@ -198,7 +198,7 @@ The decompiled original has several weaknesses; this re-implementation handles t
 Hardening in this version:
 
 * Host names are validated (no leading `-`, no spaces or shell characters) before they are passed
-  to ssh, telnet, vncviewer, FreeRDP or `{T}`; ssh additionally gets `--` before the host.
+  to ssh, vncviewer, FreeRDP or `{T}`; ssh additionally gets `--` before the host.
 * Web connections only open `http://` and `https://` URLs.
 * FreeRDP 3 gets its arguments via an environment variable (readable only by the user), so
   stdin stays free for certificate questions; with sshpass, ssh accepts new host keys on first

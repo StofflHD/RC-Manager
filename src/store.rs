@@ -281,7 +281,11 @@ impl Store {
                 id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
                 parent: uuid_opt(r.get(1)?),
                 name: r.get(2)?,
-                protocol: Protocol::from_key(&r.get::<_, String>(3)?).unwrap_or(Protocol::Rdp),
+                // Telnet support was dropped; a connection stored as "telnet" opens as SSH.
+                protocol: match r.get::<_, String>(3)?.as_str() {
+                    "telnet" => Protocol::Ssh,
+                    s => Protocol::from_key(s).unwrap_or(Protocol::Rdp),
+                },
                 host: r.get(4)?,
                 port: r.get::<_, i64>(5)?.clamp(0, 65535) as u16,
                 description: r.get(6)?,

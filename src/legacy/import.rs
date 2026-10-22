@@ -407,7 +407,6 @@ fn split_windows_cmdline(cmd: &str) -> Vec<String> {
 struct PuttyCmd {
     args: Vec<String>,
     port: Option<u16>,
-    telnet: bool,
     x11: bool,
     compression: bool,
     /// Options without an OpenSSH equivalent.
@@ -425,8 +424,8 @@ fn translate_putty(cmd: &str) -> PuttyCmd {
             "-l" | "-pw" | "-pwfile" => {
                 it.next();
             }
-            "-ssh" | "-2" | "-batch" => {}
-            "-telnet" => out.telnet = true,
+            // Telnet is no longer a protocol in RC Manager; its connections open as SSH.
+            "-ssh" | "-telnet" | "-2" | "-batch" => {}
             "-X" => out.x11 = true,
             "-C" => out.compression = true,
             "-A" | "-a" | "-4" | "-6" | "-v" | "-N" | "-T" | "-t" | "-x" | "-Y" => out.args.push(w),
@@ -589,18 +588,12 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warni
             if let Some(p) = f.int(&["Port"]).filter(|p| (1..=65535).contains(p)) {
                 *port = p as u16;
             }
-            // PuttyProtocols: 0 = SSH, 1 = Telnet
-            if f.int(&["Protocol"]) == Some(1) {
-                conn.protocol = Protocol::Telnet;
-            }
+            // PuttyProtocols: 0 = SSH, 1 = Telnet. Telnet was dropped, so both open as SSH.
             conn.options.ssh.compression = f.bool(&["SshCompression"]).unwrap_or(false);
             if f.bool(&["UseOwnCmd"]).unwrap_or(false) {
                 // The own command line replaces all other options in the original (PuttyView).
                 let cmd = translate_putty(&f.string(&["CommandLine"]).unwrap_or_default());
                 *port = cmd.port.unwrap_or(0);
-                if cmd.telnet {
-                    conn.protocol = Protocol::Telnet;
-                }
                 conn.options.ssh.x11_forwarding = cmd.x11;
                 conn.options.ssh.compression = cmd.compression;
                 conn.options.ssh.extra_args = shell_words::join(&cmd.args);
@@ -624,7 +617,7 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warni
             conn.options.external.command = format!("{file} {args}").trim().to_string();
             conn.options.external.working_dir = f.string(&["WorkingDir"]).unwrap_or_default();
         }
-        Protocol::Telnet | Protocol::Web => {}
+        Protocol::Web => {}
     }
 }
 
@@ -731,11 +724,12 @@ mod tests {
     fn putty_command_lines_become_openssh_options() {
         let c = translate_putty(r#"-ssh -P 2222 -X -C -l root -pw geheim -L 8080:localhost:80 -load "Mein Profil" -i C:\keys\id.ppk user@host"#);
         assert_eq!(c.port, Some(2222));
-        assert!(c.x11 && c.compression && !c.telnet);
+        assert!(c.x11 && c.compression);
         assert_eq!(c.args, ["-L", "8080:localhost:80"]);
         assert_eq!(c.dropped, ["-load Mein Profil", r"-i C:\keys\id.ppk"]);
         assert!(!format!("{c:?}").contains("geheim"), "password must not survive");
-        assert!(translate_putty("-telnet").telnet);
+        // -telnet is accepted but ignored (opens as SSH), so it is not reported as dropped.
+        assert!(translate_putty("-telnet").dropped.is_empty());
         assert_eq!(translate_ext_placeholders("mstsc /v:%target% /u:%username%"), "mstsc /v:{T} /u:{U}");
     }
 
