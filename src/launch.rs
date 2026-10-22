@@ -520,9 +520,9 @@ Shift <Key>Insert: insert-selection(CLIPBOARD, PRIMARY)\\n\
 Ctrl Shift <Key>V: insert-selection(CLIPBOARD, PRIMARY)\\n\
 Ctrl Shift <Key>C: copy-selection(CLIPBOARD)";
     args.extend(["-xrm", paste, "-xrm", "*selectToClipboard: true"].map(String::from));
-    // Scrollback with a scrollbar so older output stays reachable and a selection can scroll
-    // past the visible area (needed to copy more than one screen); the wheel scrolls too.
-    args.extend(["-sb", "-sl", "100000", "-bc"].map(String::from));
+    // Scrollback kept in memory (no visible scrollbar) so older output stays reachable via the
+    // wheel and the full history can still be saved to the session log.
+    args.extend(["-sl", "100000", "-bc"].map(String::from));
     // The tab closes when the session ends (the client's exit, e.g. the remote host closing the
     // connection, exits the terminal). Errors stay visible in RC Manager's log panel.
     match log {
