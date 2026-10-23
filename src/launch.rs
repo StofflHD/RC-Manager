@@ -20,7 +20,7 @@ pub struct Tools {
     pub sshpass: Option<String>,
     pub vncviewer: Option<String>,
     pub opener: Option<String>,
-    /// xterm for SSH/Telnet sessions embedded in a tab (`-into`).
+    /// xterm for SSH sessions embedded in a tab (`-into`).
     pub xterm: Option<String>,
     /// `script` (util-linux) records a terminal session to a file, so its whole history can be
     /// copied or saved later.
@@ -265,7 +265,7 @@ fn split_extra(s: &str) -> Result<Vec<String>> {
 
 /// Host names end up as program arguments (and in `{T}` of external commands), so only
 /// characters that can occur in DNS names and IPv4/IPv6 literals are allowed. A leading `-`
-/// would be read as an option by ssh, telnet or vncviewer.
+/// would be read as an option by ssh or vncviewer.
 pub fn validate_host(host: &str) -> Result<()> {
     if host.is_empty() {
         bail!("No target (host) given");
@@ -310,7 +310,7 @@ pub fn plan(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     }
     match conn.protocol {
         Protocol::Rdp => plan_rdp(conn, cred, tools, embed, cert_fingerprint),
-        Protocol::Ssh | Protocol::Telnet => plan_terminal(conn, cred, tools, embed),
+        Protocol::Ssh => plan_terminal(conn, cred, tools, embed),
         Protocol::Vnc => plan_vnc(conn, cred, tools, embed),
         Protocol::Web => plan_web(conn, tools),
         Protocol::External => plan_external(conn, cred),
@@ -545,49 +545,45 @@ fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, em
     let mut plan = Plan::default();
     let mut cmd: Vec<String> = Vec::new();
     let port = conn.effective_port();
-    if conn.protocol == Protocol::Telnet {
-        cmd.extend(["telnet".into(), conn.host.trim().into(), port.to_string()]);
-    } else {
-        let o = &conn.options.ssh;
-        let password = cred.map(|c| c.password.as_str()).unwrap_or("");
-        if !password.is_empty() {
-            match &tools.sshpass {
-                Some(sp) => {
-                    let file = secret_path("sshpass");
-                    cmd.extend([sp.clone(), "-f".into(), file.to_string_lossy().into_owned()]);
-                    plan.secret_files.push((file, password.as_bytes().to_vec()));
-                }
-                None => plan.warnings.push("sshpass is not installed – enter the password in the terminal.".into()),
+    let o = &conn.options.ssh;
+    let password = cred.map(|c| c.password.as_str()).unwrap_or("");
+    if !password.is_empty() {
+        match &tools.sshpass {
+            Some(sp) => {
+                let file = secret_path("sshpass");
+                cmd.extend([sp.clone(), "-f".into(), file.to_string_lossy().into_owned()]);
+                plan.secret_files.push((file, password.as_bytes().to_vec()));
             }
+            None => plan.warnings.push("sshpass is not installed – enter the password in the terminal.".into()),
         }
-        cmd.push("ssh".into());
-        if plan.secret_files.iter().any(|(p, _)| p.to_string_lossy().contains("sshpass")) {
-            // sshpass cannot answer "accept this host key?": store new keys (trust on first
-            // use), but still refuse changed ones.
-            cmd.extend(["-o".into(), "StrictHostKeyChecking=accept-new".into()]);
-        }
-        if port != 22 {
-            cmd.extend(["-p".into(), port.to_string()]);
-        }
-        if let Some(c) = cred.filter(|c| !c.username.is_empty()) {
-            cmd.extend(["-l".into(), c.username.clone()]);
-        }
-        if o.x11_forwarding {
-            cmd.push("-X".into());
-        }
-        if o.compression {
-            cmd.push("-C".into());
-        }
-        if !o.identity_file.trim().is_empty() {
-            cmd.extend(["-i".into(), o.identity_file.trim().into()]);
-        }
-        cmd.extend(split_extra(&o.extra_args)?);
-        // `--` ends option parsing, so the host can never be taken for an option.
-        cmd.push("--".into());
-        cmd.push(conn.host.trim().into());
-        if !o.remote_command.trim().is_empty() {
-            cmd.push(o.remote_command.trim().into());
-        }
+    }
+    cmd.push("ssh".into());
+    if plan.secret_files.iter().any(|(p, _)| p.to_string_lossy().contains("sshpass")) {
+        // sshpass cannot answer "accept this host key?": store new keys (trust on first
+        // use), but still refuse changed ones.
+        cmd.extend(["-o".into(), "StrictHostKeyChecking=accept-new".into()]);
+    }
+    if port != 22 {
+        cmd.extend(["-p".into(), port.to_string()]);
+    }
+    if let Some(c) = cred.filter(|c| !c.username.is_empty()) {
+        cmd.extend(["-l".into(), c.username.clone()]);
+    }
+    if o.x11_forwarding {
+        cmd.push("-X".into());
+    }
+    if o.compression {
+        cmd.push("-C".into());
+    }
+    if !o.identity_file.trim().is_empty() {
+        cmd.extend(["-i".into(), o.identity_file.trim().into()]);
+    }
+    cmd.extend(split_extra(&o.extra_args)?);
+    // `--` ends option parsing, so the host can never be taken for an option.
+    cmd.push("--".into());
+    cmd.push(conn.host.trim().into());
+    if !o.remote_command.trim().is_empty() {
+        cmd.push(o.remote_command.trim().into());
     }
     plan.display = redact(&cmd, &[]);
     // In a tab, record the session with `script` (if available) so its whole history can be
@@ -1091,7 +1087,7 @@ mod tests {
 
     #[test]
     fn rejects_option_injection_via_host() {
-        for proto in [Protocol::Ssh, Protocol::Telnet, Protocol::Vnc, Protocol::Rdp, Protocol::External] {
+        for proto in [Protocol::Ssh, Protocol::Vnc, Protocol::Rdp, Protocol::External] {
             for host in ["-oProxyCommand=id", "host name", "a;id", "x
 /p:secret", "$(id)"] {
                 let mut c = Connection::new("x", proto, None);

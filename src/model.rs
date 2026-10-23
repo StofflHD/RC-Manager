@@ -5,20 +5,18 @@ use uuid::Uuid;
 pub enum Protocol {
     Rdp,
     Ssh,
-    Telnet,
     Vnc,
     Web,
     External,
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 6] = [Protocol::Rdp, Protocol::Ssh, Protocol::Telnet, Protocol::Vnc, Protocol::Web, Protocol::External];
+    pub const ALL: [Protocol; 5] = [Protocol::Rdp, Protocol::Ssh, Protocol::Vnc, Protocol::Web, Protocol::External];
 
     pub fn label(self) -> &'static str {
         match self {
             Protocol::Rdp => "RDP",
             Protocol::Ssh => "SSH",
-            Protocol::Telnet => "Telnet",
             Protocol::Vnc => "VNC",
             Protocol::Web => "Web",
             Protocol::External => "External Program",
@@ -29,7 +27,6 @@ impl Protocol {
         match self {
             Protocol::Rdp => "rdp",
             Protocol::Ssh => "ssh",
-            Protocol::Telnet => "telnet",
             Protocol::Vnc => "vnc",
             Protocol::Web => "web",
             Protocol::External => "external",
@@ -44,7 +41,6 @@ impl Protocol {
         match self {
             Protocol::Rdp => 3389,
             Protocol::Ssh => 22,
-            Protocol::Telnet => 23,
             Protocol::Vnc => 5900,
             Protocol::Web => 443,
             Protocol::External => 0,
@@ -54,7 +50,7 @@ impl Protocol {
     pub fn icon(self) -> &'static str {
         match self {
             Protocol::Rdp => "🖥",
-            Protocol::Ssh | Protocol::Telnet => "⌨",
+            Protocol::Ssh => "⌨",
             Protocol::Vnc => "👁",
             Protocol::Web => "🌐",
             Protocol::External => "⚙",
