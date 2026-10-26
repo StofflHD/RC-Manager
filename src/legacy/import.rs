@@ -240,9 +240,16 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
         None
     };
 
+    let mut bad_folders = 0;
     let out_folders: Vec<Folder> = folders
         .iter()
-        .map(|(id, r)| {
+        .filter_map(|(id, r)| {
+            // A corrupt database could hold a folder id that is not a GUID: skip it instead of
+            // aborting the whole import.
+            let Ok(uuid) = Uuid::parse_str(id) else {
+                bad_folders += 1;
+                return None;
+            };
             // For the simplified inheritance the folder preferably gets the RDP credentials.
             let creds = folder_creds.get(id).cloned().unwrap_or_default();
             let pick = creds
@@ -250,17 +257,20 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
                 .find(|c| cred_type.get(*c).map(String::as_str) == Some(TYPE_RDP))
                 .or_else(|| creds.first())
                 .filter(|c| cred_ids.contains(*c));
-            Folder {
-                id: Uuid::parse_str(id).unwrap(),
+            Some(Folder {
+                id: uuid,
                 parent: parent_of(get(r, "parent")),
                 name: get(r, "name").to_string(),
                 description: get(r, "description").to_string(),
                 sorting: get(r, "sorting").parse().unwrap_or(0),
                 expanded: truthy(r.get("expandet")),
                 credential: pick.and_then(|c| Uuid::parse_str(c).ok()),
-            }
+            })
         })
         .collect();
+    if bad_folders > 0 {
+        warnings.push(format!("{bad_folders} folder(s) with an unreadable id were skipped."));
+    }
     let folder_cred_simple: HashMap<String, Option<Uuid>> = out_folders.iter().map(|f| (f.id.to_string(), f.credential)).collect();
     let simple_inherited = |start: &str| -> Option<Uuid> {
         let mut cur = start.to_string();
