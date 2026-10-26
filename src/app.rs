@@ -95,6 +95,11 @@ enum Action {
     Move(Sel, Option<Uuid>),
     /// Copy the recorded history of a terminal session (by session id) to the clipboard.
     CopySessionLog(u64),
+    /// Reconnect a tab whose session ended on its own (by its session id): drop the ended tab
+    /// and connect its connection again.
+    ReconnectTab(u64),
+    /// Close a tab (by its session id), stopping its session if it is still running.
+    CloseTab(u64),
 }
 
 /// Drag-and-drop state for the connection tree, collected while it is drawn.
@@ -299,6 +304,18 @@ struct SessionTab {
     last_fit: Instant,
     /// When the tab was opened; the periodic refit only runs for a short while after this.
     opened: Instant,
+    /// Set when the session ended on its own (host closed it, client crashed): the embedded
+    /// window is gone and the tab shows a Reconnect button instead. Only RDP and VNC tabs are
+    /// kept this way; a terminal tab closes when its session ends.
+    ended: Option<EndedTab>,
+}
+
+/// State of a tab whose session ended on its own, kept open for reconnecting.
+struct EndedTab {
+    /// The connection to reconnect, if it still exists.
+    conn: Option<Uuid>,
+    /// Short reason shown in the tab (e.g. "exit code 1").
+    reason: String,
 }
 
 /// Asks for credentials right before connecting.
@@ -740,6 +757,21 @@ impl App {
                 self.select(Some(Sel::Connection(id)));
                 self.connect(id);
             }
+            Action::ReconnectTab(session) => {
+                let conn = self.tabs.iter().find(|t| t.session == session).and_then(|t| t.ended.as_ref()).and_then(|e| e.conn);
+                self.remove_tab(session);
+                if let Some(id) = conn {
+                    self.select(Some(Sel::Connection(id)));
+                    self.connect(id);
+                }
+            }
+            Action::CloseTab(session) => {
+                if self.sessions.contains_key(&session) {
+                    self.stop_session(session);
+                } else {
+                    self.remove_tab(session);
+                }
+            }
             Action::QuickConnect => self.quick_connect(),
             Action::NewFolder(parent) => {
                 let f = Folder::new("New Folder", parent);
@@ -1010,6 +1042,7 @@ impl App {
                         placed: None,
                         last_fit: Instant::now(),
                         opened: Instant::now(),
+                        ended: None,
                     });
                     self.active_tab = Some(session);
                     self.session_focus = None;
@@ -1130,6 +1163,32 @@ impl App {
                         let lvl = if code.unwrap_or(0) == 0 { Level::Info } else { Level::Warn };
                         let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
                         self.push(lvl, format!("[{session}] {} ended (exit code {code}, {}m {}s).", s.name, dur / 60, dur % 60));
+                        // RDP/VNC drop on network loss or a server-side logoff: keep the tab with a
+                        // Reconnect button instead of closing it. A terminal session ending means the
+                        // shell exited, so its tab closes as before.
+                        let keep = matches!(s.conn.protocol, Protocol::Rdp | Protocol::Vnc) && self.tabs.iter().any(|t| t.session == session);
+                        if keep {
+                            let host = self.tabs.iter().find(|t| t.session == session).map(|t| t.host);
+                            if let Some(emb) = &self.embedder {
+                                if let Some(host) = host.filter(|h| *h != 0) {
+                                    emb.destroy(host);
+                                }
+                                if self.session_focus == Some(session) {
+                                    emb.focus(None);
+                                }
+                            }
+                            if self.session_focus == Some(session) {
+                                self.session_focus = None;
+                            }
+                            if let Some(tab) = self.tabs.iter_mut().find(|t| t.session == session) {
+                                tab.host = 0;
+                                tab.adopt = None;
+                                tab.placed = None;
+                                tab.ended = Some(EndedTab { conn: Some(s.conn.id), reason: format!("exit code {code}") });
+                            }
+                            self.prompts.retain(|p| p.session != session);
+                            continue;
+                        }
                     }
                     self.remove_tab(session);
                     self.prompts.retain(|p| p.session != session);
@@ -1575,7 +1634,7 @@ impl App {
                 self.active_tab = self.tabs.first().map(|t| t.session);
             }
             match self.active_tab {
-                Some(id) => self.session_area(ui, id),
+                Some(id) => self.session_area(ui, id, actions),
                 None => {
                     ui.centered_and_justified(|ui| {
                         ui.label(
@@ -1598,6 +1657,8 @@ impl App {
             has_mac: bool,
             /// The session is recorded, so its history can be copied.
             has_log: bool,
+            /// The session ended on its own; the connection to reconnect, if it still exists.
+            ended_conn: Option<Option<Uuid>>,
         }
         let tabs: Vec<TabInfo> = self
             .tabs
@@ -1607,7 +1668,8 @@ impl App {
                 let connection = session.map(|s| s.conn.id).filter(|id| self.connection(*id).is_some());
                 let has_mac = connection.and_then(|id| self.connection(id)).is_some_and(|c| !c.mac.trim().is_empty());
                 let has_log = session.is_some_and(|s| s.log.is_some());
-                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac, has_log }
+                let ended_conn = t.ended.as_ref().map(|e| e.conn.filter(|id| self.connection(*id).is_some()));
+                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac, has_log, ended_conn }
             })
             .collect();
         let mut close = None;
@@ -1626,7 +1688,9 @@ impl App {
                         ui.separator();
                     }
                     let sel = self.active_tab == Some(t.session);
-                    let text = RichText::new(format!("{} {}", t.icon, t.name));
+                    let label = if t.ended_conn.is_some() { format!("{} {} ⚠", t.icon, t.name) } else { format!("{} {}", t.icon, t.name) };
+                    let text = RichText::new(label);
+                    let text = if t.ended_conn.is_some() { text.weak() } else { text };
                     // A stable id per session keeps the drag attached while the order changes.
                     let r = ui.push_id(t.session, |ui| ui.add(egui::SelectableLabel::new(sel, if sel { text.strong() } else { text }))).inner;
                     let r = r.interact(egui::Sense::click_and_drag());
@@ -1646,7 +1710,13 @@ impl App {
                     // The connection's actions, like the tree's context menu; the session is
                     // running, so "Connect" reads "Reconnect".
                     r.context_menu(|ui| {
-                        if let Some(id) = t.connection {
+                        if let Some(conn) = t.ended_conn {
+                            if ui.add_enabled(conn.is_some(), egui::Button::new("⟳ Reconnect")).clicked() {
+                                actions.push(Action::ReconnectTab(t.session));
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                        } else if let Some(id) = t.connection {
                             if ui.button("⟳ Reconnect").clicked() {
                                 actions.push(Action::Reconnect(id));
                                 ui.close_menu();
@@ -1718,16 +1788,36 @@ impl App {
             self.session_focus = None;
         }
         if let Some(id) = close {
-            self.stop_session(id);
+            actions.push(Action::CloseTab(id));
         }
     }
 
     /// Reserves the area the active session's window is placed over.
-    fn session_area(&mut self, ui: &mut egui::Ui, id: u64) {
+    fn session_area(&mut self, ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
         let rect = ui.available_rect_before_wrap();
-        ui.allocate_rect(rect, egui::Sense::hover());
         let (bg, _) = theme::session_colors(self.s.dark);
         ui.painter().rect_filled(rect, 0.0, bg);
+        // A tab whose session ended on its own: no window is placed here any more; offer to
+        // reconnect or close instead of reserving the area for embedding.
+        if let Some((name, reason, can_reconnect)) = self.tabs.iter().find(|t| t.session == id).and_then(|t| {
+            t.ended.as_ref().map(|e| (t.name.clone(), e.reason.clone(), e.conn.is_some_and(|c| self.connection(c).is_some())))
+        }) {
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() / 2.0 - 48.0).max(12.0));
+                ui.label(RichText::new(format!("“{name}” disconnected")).strong().size(15.0));
+                ui.label(RichText::new(reason).weak());
+                ui.add_space(14.0);
+                if ui.add_enabled(can_reconnect, egui::Button::new(RichText::new("⟳ Reconnect").strong())).clicked() {
+                    actions.push(Action::ReconnectTab(id));
+                }
+                ui.add_space(4.0);
+                if ui.button("✖ Close tab").clicked() {
+                    actions.push(Action::CloseTab(id));
+                }
+            });
+            return;
+        }
+        ui.allocate_rect(rect, egui::Sense::hover());
         let waiting = self.tabs.iter().find(|t| t.session == id).map(|t| t.adopt.is_some()).unwrap_or(false);
         let text = if waiting { "Waiting for the session window …" } else { "Connecting …" };
         ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, egui::FontId::proportional(14.0), ui.visuals().weak_text_color());
@@ -3293,7 +3383,10 @@ impl App {
         if let Some(pos) = self.tabs.iter().position(|t| t.session == session) {
             let tab = self.tabs.remove(pos);
             if let Some(emb) = &self.embedder {
-                emb.destroy(tab.host);
+                // An ended tab already had its window destroyed (host set to 0).
+                if tab.host != 0 {
+                    emb.destroy(tab.host);
+                }
                 if self.session_focus == Some(session) {
                     emb.focus(None);
                 }
@@ -3371,6 +3464,10 @@ impl App {
         let mut logs = Vec::new();
         let mut focus_change = None;
         for tab in &mut self.tabs {
+            // An ended tab has no window to place; it shows its Reconnect button instead.
+            if tab.ended.is_some() {
+                continue;
+            }
             // TigerVNC: move its window into the tab as soon as it appears.
             if let Some((pid, since)) = tab.adopt {
                 if let Some(win) = emb.window_of_pid(pid) {
