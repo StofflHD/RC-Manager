@@ -30,7 +30,7 @@ jobs:
             libssl-dev zlib1g-dev libcjson-dev libusb-1.0-0-dev \
             libx11-dev libxext-dev libxinerama-dev libxcursor-dev libxdamage-dev libxv-dev \
             libxkbfile-dev libxi-dev libxrandr-dev libxrender-dev libxfixes-dev libxtst-dev \
-            libxkbcommon-dev libxkbcommon-x11-0 libasound2-dev libpulse-dev libcups2-dev libpcsclite-dev libopenh264-dev \
+            libxkbcommon-dev libxkbcommon-x11-0 libasound2-dev libpulse-dev libcups2-dev libpcsclite-dev libopenh264-dev libfuse3-dev \
             tigervnc-viewer sshpass xterm \
             xvfb freerdp2-shadow-x11 x11vnc x11-apps x11-xserver-utils imagemagick xdotool x11-utils libgl1-mesa-dri libegl1
 
@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.FREERDP_PREFIX }}
-          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-h264-v4
+          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-h264-fuse-v5
 
       - name: Build FreeRDP ${{ env.FREERDP_VERSION }}
         if: steps.freerdp-cache.outputs.cache-hit != 'true'
@@ -58,7 +58,7 @@ jobs:
             -DWITH_SERVER=OFF -DWITH_SHADOW=OFF -DWITH_PROXY=OFF -DWITH_SAMPLE=OFF -DWITH_PLATFORM_SERVER=OFF \
             -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF -DWITH_DSP_FFMPEG=OFF -DWITH_VIDEO_FFMPEG=OFF \
             -DWITH_OPENH264=ON -DWITH_OPENH264_LOADING=OFF \
-            -DWITH_FUSE=OFF -DWITH_WEBVIEW=OFF -DWITH_KRB5=OFF -DWITH_PKCS11=OFF -DWITH_CAIRO=OFF \
+            -DWITH_FUSE=ON -DWITH_WEBVIEW=OFF -DWITH_KRB5=OFF -DWITH_PKCS11=OFF -DWITH_CAIRO=OFF \
             -DWITH_URIPARSER=OFF -DUSE_UNWIND=OFF -DWITH_UNICODE_BUILTIN=ON \
             -DWITH_PULSE=ON -DWITH_ALSA=ON -DWITH_CUPS=ON -DWITH_PCSC=ON \
             -DCHANNEL_URBDRC=OFF -DWITH_MANPAGES=OFF -DBUILD_TESTING=OFF -DWITH_VERBOSE_WINPR_ASSERT=OFF
@@ -93,6 +93,10 @@ jobs:
           # H.264 (/gfx:AVC444) needs OpenH264 linked into FreeRDP and bundled along.
           ls -la squashfs-root/usr/lib/libopenh264.so* || { echo "libopenh264 not bundled – H.264 would be unavailable" >&2; exit 1; }
           ldd squashfs-root/usr/lib/libfreerdp*.so* 2>/dev/null | grep -q libopenh264 || { echo "FreeRDP is not linked against OpenH264" >&2; exit 1; }
+          # Copying files from the remote into Linux (clipboard) needs FreeRDP's FUSE support
+          # (WITH_FUSE); libfuse3 must be linked and bundled, or only Linux -> Windows works.
+          ls -la squashfs-root/usr/lib/libfuse3.so* || { echo "libfuse3 not bundled – remote->local file copy would be unavailable" >&2; exit 1; }
+          ldd squashfs-root/usr/bin/xfreerdp* squashfs-root/usr/lib/libfreerdp*.so* 2>/dev/null | grep -q libfuse3 || { echo "FreeRDP is not linked against libfuse3 (WITH_FUSE)" >&2; exit 1; }
           squashfs-root/usr/bin/xfreerdp* --version > rdp.txt 2>&1 || true
           cat rdp.txt
           grep -q "version ${FREERDP_VERSION}" rdp.txt
