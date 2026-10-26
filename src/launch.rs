@@ -731,10 +731,14 @@ pub fn is_credential_prompt(text: &str) -> bool {
 /// local keymap without an RDP scancode (often 100+ lines per connection), and FreeRDP 3.32
 /// prints "REMOTE HOST IDENTIFICATION HAS CHANGED" for every certificate it does not know
 /// (its store is empty: RC Manager's certificate dialog and fingerprint store decide).
+/// FreeRDP also warns on every clipboard copy whose HTML or image format the other side cannot
+/// deliver or convert (plain text still transfers); that is a normal limitation, not an error.
 fn is_noise(line: &str) -> bool {
     line.contains("no RDP scancode found")
         || line.contains("[tls_print_new_certificate_warn]")
         || line.contains("BIO_new failed for certificate")
+        || line.contains("[xf_cliprdr_server_format_data_response]")
+        || line.contains("[clipboard_synthesize_")
 }
 
 /// Splits a stream into lines and also reports an unfinished line that is a prompt.
@@ -921,6 +925,8 @@ mod tests {
         let pre = "[15:41:00:521] [374103:0005b55c] [ERROR][com.freerdp.crypto] - ";
         assert!(is_noise(&format!("{pre}[tls_print_new_certificate_warn]: Host key verification failed.")));
         assert!(is_noise("[WARN][com.freerdp.client.x11] - [load_map_from_xkbfile]: MENU: keycode: 0x75 -> no RDP scancode found"));
+        assert!(is_noise("[WARN][com.freerdp.client.x11.cliprdr] - [xf_cliprdr_server_format_data_response]: failed to get clipboard data in format text/html [source format HTML Format]"));
+        assert!(is_noise("[WARN][com.winpr.clipboard.synthetic] - [clipboard_synthesize_image_ms_html]: Unsupported image format id 0x0000c005 [image/bmp]"));
         assert!(!is_noise(&format!("{pre}[tls_print_certificate_name_mismatch_error]: A valid certificate for the wrong name should NOT be trusted!")));
         assert!(!is_noise("Certificate details for 192.0.2.10:3389 (RDP-Server):"));
     }
