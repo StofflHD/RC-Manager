@@ -39,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.FREERDP_PREFIX }}
-          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-h264-fuse-v5
+          key: freerdp-${{ env.FREERDP_VERSION }}-ubuntu-22.04-h264-fuse-fileclip-v6
 
       - name: Build FreeRDP ${{ env.FREERDP_VERSION }}
         if: steps.freerdp-cache.outputs.cache-hit != 'true'
@@ -50,6 +50,13 @@ jobs:
           curl -fsSL -o freerdp.tar.gz \
             "https://github.com/FreeRDP/FreeRDP/archive/refs/tags/${FREERDP_VERSION}.tar.gz"
           tar xzf freerdp.tar.gz
+          # FreeRDP 3.32.x regression: copying files from the server into the local clipboard
+          # always failed (FileGroupDescriptorW -> text/uri-list conversion). Fixed by FreeRDP
+          # PR #13714, merged to master after 3.32.2 and not in any 3.32.x release yet, so
+          # cherry-pick that single winpr commit onto the release source.
+          curl -fsSL -o fileclip.patch \
+            "https://github.com/FreeRDP/FreeRDP/commit/c3a7818b1b9962bcb66fae4f9a30cf97dddc4e78.patch"
+          patch -p1 -d "FreeRDP-${FREERDP_VERSION}" < fileclip.patch
           cmake -S "FreeRDP-${FREERDP_VERSION}" -B freerdp-build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$FREERDP_PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
