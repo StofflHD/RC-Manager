@@ -6,7 +6,7 @@
 #
 # With BUNDLE_TOOLS=1 the clients are shipped inside the AppImage as well:
 #   FreeRDP (xfreerdp, from FREERDP_PREFIX, default /opt/freerdp), TigerVNC (vncviewer),
-#   sshpass and xterm (SSH/Telnet in tabs), each with the libraries they need (via linuxdeploy). The AppImage then
+#   sshpass and xterm (SSH in tabs), each with the libraries they need (via linuxdeploy). The AppImage then
 #   requires the glibc of the build machine. RC Manager prefers these bundled clients and
 #   falls back to installed ones if a bundled client cannot run.
 #

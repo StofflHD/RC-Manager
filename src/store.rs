@@ -300,7 +300,7 @@ impl Store {
                 id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
                 parent: uuid_opt(r.get(1)?),
                 name: r.get(2)?,
-                // Telnet support was dropped; a connection stored as "telnet" opens as SSH.
+                // Data from before 0.8.4 may still name the protocol removed then; it opens as SSH.
                 protocol: match r.get::<_, String>(3)?.as_str() {
                     "telnet" => Protocol::Ssh,
                     s => Protocol::from_key(s).unwrap_or(Protocol::Rdp),

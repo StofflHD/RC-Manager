@@ -437,7 +437,7 @@ fn translate_putty(cmd: &str) -> PuttyCmd {
             "-l" | "-pw" | "-pwfile" => {
                 it.next();
             }
-            // Telnet is no longer a protocol in RC Manager; its connections open as SSH.
+            // Protocol switches of the original: every connection opens as SSH.
             "-ssh" | "-telnet" | "-2" | "-batch" => {}
             "-X" => out.x11 = true,
             "-C" => out.compression = true,
@@ -601,7 +601,7 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warni
             if let Some(p) = f.int(&["Port"]).filter(|p| (1..=65535).contains(p)) {
                 *port = p as u16;
             }
-            // PuttyProtocols: 0 = SSH, 1 = Telnet. Telnet was dropped, so both open as SSH.
+            // PuttyProtocols of the original: every value opens as SSH.
             conn.options.ssh.compression = f.bool(&["SshCompression"]).unwrap_or(false);
             if f.bool(&["UseOwnCmd"]).unwrap_or(false) {
                 // The own command line replaces all other options in the original (PuttyView).
@@ -741,7 +741,7 @@ mod tests {
         assert_eq!(c.args, ["-L", "8080:localhost:80"]);
         assert_eq!(c.dropped, ["-load Mein Profil", r"-i C:\keys\id.ppk"]);
         assert!(!format!("{c:?}").contains("geheim"), "password must not survive");
-        // -telnet is accepted but ignored (opens as SSH), so it is not reported as dropped.
+        // The original's protocol switch is accepted but ignored (opens as SSH), not reported as dropped.
         assert!(translate_putty("-telnet").dropped.is_empty());
         assert_eq!(translate_ext_placeholders("mstsc /v:%target% /u:%username%"), "mstsc /v:{T} /u:{U}");
     }
