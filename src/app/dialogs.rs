@@ -846,13 +846,27 @@ impl App {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.label("Assign to");
-                            egui::ComboBox::from_id_salt("cred_assign").selected_text("a connection …").width(210.0).show_ui(ui, |ui| {
-                                for (id, name) in &avail {
-                                    if ui.selectable_label(false, name).clicked() {
-                                        assign = Some((*id, cid));
+                            let combo = egui::ComboBox::from_id_salt("cred_assign").selected_text("a connection …").width(210.0).show_ui(ui, |ui| {
+                                ui.add(egui::TextEdit::singleline(&mut self.cred_assign_filter).hint_text("🔍 Filter …").desired_width(196.0));
+                                let f = self.cred_assign_filter.trim().to_lowercase();
+                                ui.separator();
+                                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                                    let mut any = false;
+                                    for (id, name) in avail.iter().filter(|(_, n)| f.is_empty() || n.to_lowercase().contains(&f)) {
+                                        any = true;
+                                        if ui.selectable_label(false, name).clicked() {
+                                            assign = Some((*id, cid));
+                                        }
                                     }
-                                }
+                                    if !any {
+                                        ui.label(RichText::new("No match").weak());
+                                    }
+                                });
                             });
+                            // Start each time with an empty filter.
+                            if combo.response.clicked() {
+                                self.cred_assign_filter.clear();
+                            }
                         });
                     }
                     self.cred_edit = Some(c);
@@ -1077,6 +1091,7 @@ impl App {
             self.cred_confirm_delete = None;
             self.cred_confirm_bulk = false;
             self.cred_checked.clear();
+            self.cred_assign_filter.clear();
             self.cred_show_password = false;
         }
         self.show_credentials = open;

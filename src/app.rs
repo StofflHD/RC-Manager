@@ -446,6 +446,8 @@ pub struct App {
     /// `cred_edit` is a new set that is not stored yet.
     cred_new: bool,
     cred_filter: String,
+    /// Filter text in the "assign to a connection" combo of the credential detail.
+    cred_assign_filter: String,
     cred_show_password: bool,
     cred_confirm_delete: Option<Uuid>,
     /// Column the credential list is sorted by, and whether descending.
@@ -545,6 +547,7 @@ impl App {
             cred_edit: None,
             cred_new: false,
             cred_filter: String::new(),
+            cred_assign_filter: String::new(),
             cred_show_password: false,
             cred_confirm_delete: None,
             cred_sort: CredSort::default(),
