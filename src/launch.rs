@@ -1133,7 +1133,11 @@ mod tests {
         let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
         assert_eq!(p.args, vec!["/args-from:env:RC_MANAGER_FREERDP_ARGS"]);
         assert!(p.interactive, "stdin stays open for certificate questions");
-        assert!(p.env.iter().any(|(k, v)| k == "XDG_CONFIG_HOME" && v.contains("rc-manager/freerdp/run-")));
+        if cfg!(windows) {
+            assert!(p.env.iter().any(|(k, v)| k == "RC_MANAGER_PROMPTS" && v == "1"));
+        } else {
+            assert!(p.env.iter().any(|(k, v)| k == "XDG_CONFIG_HOME" && v.contains("rc-manager/freerdp/run-")));
+        }
         let (name, value) = p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap();
         assert_eq!(name, "RC_MANAGER_FREERDP_ARGS");
         let lines: Vec<&str> = value.lines().collect();

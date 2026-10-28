@@ -356,7 +356,9 @@ mod tests {
         let json = r#"[
           {"tag_name":"v0.6.0","body":"notes","html_url":"https://x/0.6","draft":false,"prerelease":true,
            "assets":[{"name":"RC-Manager-0.6.0-x86_64.AppImage","browser_download_url":"https://x/a","size":5},
-                     {"name":"RC-Manager-0.6.0-x86_64.AppImage.sha256","browser_download_url":"https://x/s","size":1}]},
+                     {"name":"RC-Manager-0.6.0-x86_64.AppImage.sha256","browser_download_url":"https://x/s","size":1},
+                     {"name":"RC-Manager-0.6.0-windows-x64-setup.exe","browser_download_url":"https://x/a","size":5},
+                     {"name":"RC-Manager-0.6.0-windows-x64-setup.exe.sha256","browser_download_url":"https://x/s","size":1}]},
           {"tag_name":"v0.7.0","html_url":"https://x/0.7","draft":true,"prerelease":false,"assets":[]},
           {"tag_name":"v0.5.4","html_url":"https://x/0.5.4","draft":false,"prerelease":true,"assets":[]}
         ]"#;
