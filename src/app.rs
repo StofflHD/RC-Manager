@@ -1431,7 +1431,21 @@ impl App {
             })
             .unwrap_or_default();
         let shape = emb.can_shape();
-        let covered = !covers.is_empty() && !shape;
+        // An egui window (Order::Middle) over the session is a modal dialog (properties,
+        // credentials, import, …). Cutting a SHAPE hole for a centred dialog made the session
+        // shimmer around its edges every repaint, so hide the session entirely while one is
+        // open instead. Menus and the sidebar overlay are Order::Foreground and still cut holes.
+        let dialog_over = rect.is_some_and(|r| {
+            ctx.memory(|m| {
+                m.areas()
+                    .visible_layer_ids()
+                    .into_iter()
+                    .filter(|l| l.order == egui::Order::Middle)
+                    .filter_map(|l| m.area_rect(l.id))
+                    .any(|a| a.intersects(r))
+            })
+        });
+        let covered = (!covers.is_empty() && !shape) || dialog_over;
         let mut logs = Vec::new();
         let mut focus_change = None;
         for tab in &mut self.tabs {
