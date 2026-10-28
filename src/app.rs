@@ -479,6 +479,88 @@ fn strip_log_prefix(line: &str) -> String {
     }
 }
 
+/// Strips ANSI escape sequences and control bytes from a recorded terminal line, so the plain
+/// text of a `script` typescript can be scanned and shown.
+fn clean_terminal_line(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                // CSI "ESC [ … <letter>": skip up to and including the final letter.
+                Some('[') => {
+                    chars.next();
+                    while let Some(&n) = chars.peek() {
+                        chars.next();
+                        if n.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+                // Other escapes (e.g. "ESC ) 0"): drop the single following byte.
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+        if c == '\r' || ((c as u32) < 0x20 && c != '\t') {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Known endings of an SSH/terminal session that never came up – a network or ssh error rather
+/// than a normal logout. Kept specific so a clean logout ("Connection to host closed.") is not
+/// mistaken for a failure.
+const SSH_FAILURE_SIGNS: &[&str] = &[
+    "ssh: connect to host",
+    "connection refused",
+    "could not resolve hostname",
+    "name or service not known",
+    "no address associated with hostname",
+    "connection timed out",
+    "operation timed out",
+    "no route to host",
+    "network is unreachable",
+    "host key verification failed",
+    "remote host identification has changed",
+    "permission denied (",
+    "permission denied, please try again",
+    "too many authentication failures",
+    "ssh_exchange_identification",
+];
+
+/// Reads the recorded log of a just-ended terminal (SSH) session and, if its last lines show the
+/// connection could not be established, returns that error line to show in the tab. Returns None
+/// for a session that connected normally (so its tab closes as before).
+fn terminal_failure_reason(log: &std::path::Path) -> Option<String> {
+    let data = std::fs::read(log).ok()?;
+    let text = String::from_utf8_lossy(&data);
+    let lines: Vec<String> = text
+        .lines()
+        .map(clean_terminal_line)
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with("Script started") && !l.starts_with("Script done"))
+        .collect();
+    // Only the last lines matter: when an ssh connect fails, ssh is the terminal's only process,
+    // so its error is the final output before the window closes. Scanning deeper would match the
+    // same words printed earlier in a session that then logged out cleanly.
+    let hit = lines.iter().rev().take(3).find(|l| {
+        let low = l.to_lowercase();
+        SSH_FAILURE_SIGNS.iter().any(|s| low.contains(s))
+    })?;
+    // One tidy line for the tab.
+    let mut reason = hit.clone();
+    if reason.chars().count() > 200 {
+        reason = reason.chars().take(199).collect::<String>() + "…";
+    }
+    Some(reason)
+}
+
 fn now_string() -> String {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
@@ -1186,6 +1268,17 @@ impl App {
                 }
                 Event::Exited { session, code } => {
                     if let Some(s) = self.sessions.remove(&session) {
+                        // A terminal (SSH) session that never connected: read the ssh error from its
+                        // recorded log before it is deleted, so the tab can show why. If nothing was
+                        // recorded but it ended within seconds, it still almost certainly failed to
+                        // connect, so show a generic hint rather than letting the tab vanish.
+                        let terminal_fail = if matches!(s.conn.protocol, Protocol::Ssh) && !s.closing {
+                            s.log.as_deref().and_then(terminal_failure_reason).or_else(|| {
+                                (s.started.elapsed() < Duration::from_secs(3)).then(|| "The SSH session could not be established.".to_string())
+                            })
+                        } else {
+                            None
+                        };
                         if let Some(log) = &s.log {
                             std::fs::remove_file(log).ok();
                         }
@@ -1196,14 +1289,24 @@ impl App {
                             self.prompts.retain(|p| p.session != session);
                             continue;
                         }
-                        let lvl = if code.unwrap_or(0) == 0 { Level::Info } else { Level::Warn };
                         let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
-                        self.push(lvl, format!("[{session}] {} ended (exit code {code}, {}m {}s).", s.name, dur / 60, dur % 60));
-                        // RDP/VNC drop on network loss or a server-side logoff: keep the tab with a
-                        // Reconnect button instead of closing it. A terminal session ending means the
-                        // shell exited, so its tab closes as before.
-                        let keep = matches!(s.conn.protocol, Protocol::Rdp | Protocol::Vnc) && self.tabs.iter().any(|t| t.session == session);
+                        if let Some(reason) = &terminal_fail {
+                            self.push(Level::Warn, format!("[{session}] {} could not connect: {reason}", s.name));
+                        } else {
+                            self.push(Level::Warn, format!("[{session}] {} ended (exit code {code}, {}m {}s).", s.name, dur / 60, dur % 60));
+                        }
+                        // RDP/VNC drop on network loss or a server-side logoff, and a terminal (SSH)
+                        // session that never connected ends at once: keep the tab with the reason and
+                        // a Reconnect button instead of letting it vanish. A terminal session that was
+                        // logged out of (no failure in its log) closes as before.
+                        let reason = if matches!(s.conn.protocol, Protocol::Rdp | Protocol::Vnc) {
+                            Some(format!("exit code {code}"))
+                        } else {
+                            terminal_fail
+                        };
+                        let keep = reason.is_some() && self.tabs.iter().any(|t| t.session == session);
                         if keep {
+                            let reason = reason.unwrap_or_default();
                             let host = self.tabs.iter().find(|t| t.session == session).map(|t| t.host);
                             if let Some(emb) = &self.embedder {
                                 if let Some(host) = host.filter(|h| *h != 0) {
@@ -1220,7 +1323,7 @@ impl App {
                                 tab.host = 0;
                                 tab.adopt = None;
                                 tab.placed = None;
-                                tab.ended = Some(EndedTab { conn: Some(s.conn.id), reason: format!("exit code {code}") });
+                                tab.ended = Some(EndedTab { conn: Some(s.conn.id), reason });
                             }
                             self.prompts.retain(|p| p.session != session);
                             continue;
@@ -1813,5 +1916,33 @@ mod tests {
         let (hp, fp) = certificate_of(&changed).unwrap();
         assert_eq!(hp, "127.0.0.1:3390");
         assert!(fp.starts_with("f0066505"));
+    }
+
+    #[test]
+    fn terminal_control_sequences_are_stripped() {
+        assert_eq!(clean_terminal_line("\u{1b}[0;31mred\u{1b}[0m text\r"), "red text");
+        assert_eq!(clean_terminal_line("plain\ttab"), "plain\ttab");
+    }
+
+    fn reason_of(typescript: &str) -> Option<String> {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("rcm-test-{}.log", Uuid::new_v4()));
+        std::fs::write(&path, typescript).unwrap();
+        let r = terminal_failure_reason(&path);
+        std::fs::remove_file(&path).ok();
+        r
+    }
+
+    #[test]
+    fn ssh_connect_failures_are_detected() {
+        // A failed connect shows the ssh error line.
+        let r = reason_of("Script started on 2026-01-01\r\nssh: connect to host box port 22: Connection refused\r\n").unwrap();
+        assert!(r.contains("Connection refused"), "{r}");
+        assert!(reason_of("ssh: connect to host nope port 22: Name or service not known\n").unwrap().contains("Name or service not known"));
+        assert!(reason_of("\u{1b}[31mPermission denied (publickey,password).\u{1b}[0m\n").is_some());
+        // A normal logout is not a failure.
+        assert!(reason_of("admin@box:~$ exit\r\nlogout\r\nConnection to box closed.\r\n").is_none());
+        // A session that merely printed those words earlier, then logged out cleanly, is not one.
+        assert!(reason_of("$ cat log\nConnection refused earlier\n$ exit\nlogout\nConnection to box closed.\n").is_none());
     }
 }
