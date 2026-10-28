@@ -698,7 +698,21 @@ impl App {
                             ui.add_enabled_ui(!dirty, |ui| {
                                 let arrow = |c: CredSort| if sort == c { if desc { " ▼" } else { " ▲" } } else { "" };
                                 egui::Grid::new("cred_table").num_columns(5).spacing([10.0, 4.0]).show(ui, |ui| {
-                                    ui.label("");
+                                    // Select-all checkbox: ticks/unticks every currently listed row.
+                                    let all_checked = !rows.is_empty() && rows.iter().all(|(c, _)| self.cred_checked.contains(&c.id));
+                                    let mut sel_all = all_checked;
+                                    ui.add_enabled(!rows.is_empty(), egui::Checkbox::without_text(&mut sel_all)).on_hover_text("Select all");
+                                    if sel_all != all_checked {
+                                        if sel_all {
+                                            for (c, _) in &rows {
+                                                self.cred_checked.insert(c.id);
+                                            }
+                                        } else {
+                                            for (c, _) in &rows {
+                                                self.cred_checked.remove(&c.id);
+                                            }
+                                        }
+                                    }
                                     for (col, label) in
                                         [(CredSort::Name, "Name"), (CredSort::User, "User"), (CredSort::Domain, "Domain"), (CredSort::Used, "Used")]
                                     {
