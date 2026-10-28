@@ -6,3 +6,4 @@ packaging/AppRun text eol=lf
 *.bin binary
 *.png binary
 *.ttf binary
+*.ico binary

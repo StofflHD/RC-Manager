@@ -1,7 +1,8 @@
 //! Starts the actual clients (FreeRDP, ssh in a terminal, TigerVNC, browser …).
 //!
-//! The Windows original embeds ActiveX/PuTTY/VNC windows in tabs. On Linux the
-//! established native clients are started in their own windows instead.
+//! The Windows original embeds ActiveX/PuTTY/VNC windows in tabs. RC Manager starts the
+//! established clients and embeds their windows (see `embed.rs`): on Linux FreeRDP (X11),
+//! ssh in xterm and TigerVNC; on Windows FreeRDP (wfreerdp), PuTTY and TigerVNC.
 
 use crate::model::*;
 use anyhow::{anyhow, bail, Context, Result};
@@ -18,6 +19,8 @@ pub struct Tools {
     /// Terminal program and the arguments before the actual command
     pub terminal: Option<(String, Vec<String>)>,
     pub sshpass: Option<String>,
+    /// Windows: PuTTY for SSH (embedded in a tab, password via `-pwfile`).
+    pub putty: Option<String>,
     pub vncviewer: Option<String>,
     pub opener: Option<String>,
     /// xterm for SSH sessions embedded in a tab (`-into`).
@@ -33,10 +36,10 @@ pub struct Tools {
     pub freerdp_config: Option<PathBuf>,
 }
 
-/// Where an embedded session is drawn: the X11 host window of its tab (see `embed.rs`).
+/// Where an embedded session is drawn: the host window of its tab (see `embed.rs`).
 #[derive(Debug, Clone, Copy)]
 pub struct EmbedTarget {
-    pub host: u32,
+    pub host: crate::embed::WinId,
     /// Size of the tab in physical pixels.
     pub width: u32,
     pub height: u32,
@@ -44,7 +47,7 @@ pub struct EmbedTarget {
 }
 
 pub fn find_in_path(name: &str) -> Option<String> {
-    if name.contains('/') {
+    if name.contains(['/', '\\']) {
         return Path::new(name).is_file().then(|| name.to_string());
     }
     std::env::var_os("PATH").and_then(|paths| {
@@ -52,9 +55,24 @@ pub fn find_in_path(name: &str) -> Option<String> {
     })
 }
 
-/// Directory with the clients shipped inside the AppImage (exported by `AppRun`).
+/// Directory with the clients shipped inside the AppImage (exported by `AppRun`), on Windows
+/// the `clients` folder next to `rc-manager.exe`.
 pub fn bundle_dir() -> Option<PathBuf> {
-    std::env::var_os("RC_MANAGER_BUNDLE_DIR").map(PathBuf::from).filter(|d| d.is_dir())
+    let dir = std::env::var_os("RC_MANAGER_BUNDLE_DIR").map(PathBuf::from);
+    #[cfg(windows)]
+    let dir = dir.or_else(|| std::env::current_exe().ok()?.parent().map(|d| d.join("clients")));
+    dir.filter(|d| d.is_dir())
+}
+
+/// Windows: starts a console program without a (flashing) console window.
+pub fn hide_console(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
 }
 
 fn in_bundle(name: &str) -> Option<String> {
@@ -80,7 +98,7 @@ static BUNDLE_PROBLEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Ve
 /// Runs a program once (e.g. with `--version`) and returns its output, or `None` if it
 /// cannot be started on this system.
 fn probe(path: &str, arg: &str) -> Option<String> {
-    let out = Command::new(path).arg(arg).stdin(Stdio::null()).output().ok()?;
+    let out = hide_console(Command::new(path).arg(arg).stdin(Stdio::null())).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if !loader_failed(&text) {
         return Some(text);
@@ -107,7 +125,8 @@ fn freerdp_at(path: String, name: &str) -> Option<(String, u32)> {
         .nth(1)
         .and_then(|v| v.trim().chars().next())
         .and_then(|c| c.to_digit(10))
-        .unwrap_or(if name.contains('3') { 3 } else { 2 });
+        // wfreerdp (Windows) only exists as FreeRDP 3 here.
+        .unwrap_or(if name.contains('3') || cfg!(windows) { 3 } else { 2 });
     Some((path, major))
 }
 
@@ -116,6 +135,51 @@ pub fn is_bundled(path: &str) -> bool {
 }
 
 impl Tools {
+    /// Windows: the clients next to `rc-manager.exe` (installer and portable ZIP ship FreeRDP,
+    /// PuTTY and TigerVNC), otherwise installed ones.
+    #[cfg(windows)]
+    pub fn detect() -> Self {
+        let program_files = |rel: &str| {
+            ["ProgramFiles", "ProgramFiles(x86)"]
+                .iter()
+                .filter_map(|v| std::env::var_os(v))
+                .map(|d| PathBuf::from(d).join(rel))
+                .find(|p| p.is_file())
+                .map(|p| p.to_string_lossy().into_owned())
+        };
+        let find = |names: &[&str], installed: &[&str]| {
+            names
+                .iter()
+                .find_map(|n| in_bundle(n))
+                .or_else(|| names.iter().find_map(|n| find_in_path(n)))
+                .or_else(|| installed.iter().find_map(|p| program_files(p)))
+        };
+        let freerdp = find(&["wfreerdp.exe", "sdl-freerdp3.exe", "sdl-freerdp.exe"], &["FreeRDP\\wfreerdp.exe"]).map(|p| {
+            let name = p.clone();
+            freerdp_at(p, &name).unwrap_or((name, 3))
+        });
+        Self {
+            freerdp,
+            // Without PuTTY: OpenSSH of Windows in a console window.
+            terminal: Some(("cmd.exe".into(), Vec::new())),
+            sshpass: None,
+            putty: find(&["putty.exe"], &["PuTTY\\putty.exe"]),
+            vncviewer: find(&["vncviewer.exe", "vncviewer64.exe"], &["TigerVNC\\vncviewer.exe", "TigerVNC Viewer\\vncviewer.exe"]),
+            // Explorer opens http(s) URLs in the default browser.
+            opener: Some("explorer.exe".into()),
+            xterm: None,
+            script: None,
+            home: dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default(),
+            freerdp_config: None,
+        }
+    }
+
+    /// Clients that can run embedded in a tab for SSH: xterm (Linux) or PuTTY (Windows).
+    pub fn ssh_embeddable(&self) -> bool {
+        self.xterm.is_some() || self.putty.is_some()
+    }
+
+    #[cfg(not(windows))]
     pub fn detect() -> Self {
         BUNDLE_PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         // Clients shipped in the AppImage come first, if they run on this system.
@@ -157,6 +221,7 @@ impl Tools {
             freerdp,
             terminal,
             sshpass: bundled(&["sshpass"], "-V").or_else(|| find_in_path("sshpass")),
+            putty: None,
             vncviewer: bundled(&vnc_names, "-help").or_else(|| vnc_names.iter().find_map(|n| find_in_path(n))),
             opener: find_in_path("xdg-open"),
             xterm: bundled(&["xterm"], "-version").or_else(|| find_in_path("xterm")),
@@ -166,6 +231,19 @@ impl Tools {
         }
     }
 
+    #[cfg(windows)]
+    pub fn summary(&self) -> Vec<(&'static str, String)> {
+        let label = |p: &str| if is_bundled(p) { format!("bundled ({p})") } else { p.to_string() };
+        let show = |o: &Option<String>, missing: &str| o.as_deref().map(label).unwrap_or_else(|| missing.to_string());
+        vec![
+            ("RDP (FreeRDP)", self.freerdp.as_ref().map(|(p, v)| format!("{} – v{v}", label(p))).unwrap_or_else(|| "not found – install FreeRDP or use the full RC Manager package".into())),
+            ("SSH (PuTTY)", show(&self.putty, "not found – SSH opens Windows' ssh in a console window")),
+            ("VNC (TigerVNC)", show(&self.vncviewer, "not found – install the TigerVNC viewer")),
+            ("Browser", show(&self.opener, "not found")),
+        ]
+    }
+
+    #[cfg(not(windows))]
     pub fn summary(&self) -> Vec<(&'static str, String)> {
         let label = |p: &str| if is_bundled(p) { format!("bundled with the AppImage ({p})") } else { p.to_string() };
         let show = |o: &Option<String>| o.as_deref().map(label).unwrap_or_else(|| "not found".into());
@@ -221,6 +299,8 @@ pub struct Plan {
     /// Terminal sessions: file the whole session is recorded to (via `script`), so its history
     /// can be copied or saved. Removed when the session ends.
     pub session_log: Option<PathBuf>,
+    /// Windows: start without a console window (a console program that opens its own one).
+    pub hide_console: bool,
 }
 
 fn secret_path(tag: &str) -> PathBuf {
@@ -456,7 +536,12 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     let display = format!("{program} {}", redact(&a, &secrets));
     // stdin stays open: FreeRDP asks there whether to trust an unknown certificate.
     let mut plan = Plan { program, display, interactive: true, ..Default::default() };
-    if let Some(base) = &tools.freerdp_config {
+    // wfreerdp would ask with its own message boxes; RC Manager's build asks on the console
+    // instead (like FreeRDP on Linux), so RC Manager's certificate and logon dialogs apply.
+    if cfg!(windows) {
+        plan.env.push(("RC_MANAGER_PROMPTS".into(), "1".into()));
+    }
+    if let Some(base) = tools.freerdp_config.as_ref().filter(|_| !cfg!(windows)) {
         // A fresh directory per start: FreeRDP's certificate store must never decide (an entry
         // it cannot read makes it refuse the connection as "changed" without asking).
         static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -483,6 +568,17 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
 }
 
 /// Runs a command in a terminal and keeps the window open on failure.
+#[cfg(windows)]
+fn in_terminal(tools: &Tools, title: &str, cmd: Vec<String>) -> Result<(String, Vec<String>)> {
+    // A new console window that stays open after the command (cmd /K).
+    let shell = tools.terminal.as_ref().map(|(p, _)| p.clone()).unwrap_or_else(|| "cmd.exe".into());
+    let mut args: Vec<String> = ["/C", "start", title, "cmd", "/K"].map(String::from).to_vec();
+    args.extend(cmd);
+    Ok((shell, args))
+}
+
+/// Runs a command in a terminal and keeps the window open on failure.
+#[cfg(not(windows))]
 fn in_terminal(tools: &Tools, title: &str, cmd: Vec<String>) -> Result<(String, Vec<String>)> {
     let (term, prefix) = tools.terminal.clone().ok_or_else(|| anyhow!("No terminal emulator found (e.g. gnome-terminal, konsole, xterm)"))?;
     let mut args = Vec::new();
@@ -541,7 +637,54 @@ Ctrl Shift <Key>C: copy-selection(CLIPBOARD)";
     (xterm.to_string(), args)
 }
 
+/// PuTTY (Windows): the password comes from a file (`-pwfile`, not visible in the process
+/// list), the session is logged with `-sessionlog` for "copy/save history", and in a tab its
+/// window is moved into the tab like TigerVNC's.
+fn plan_putty(conn: &Connection, cred: Option<&Credential>, putty: &str, embed: Option<&EmbedTarget>) -> Result<Plan> {
+    let o = &conn.options.ssh;
+    let mut plan = Plan { program: putty.to_string(), adopt_window: embed.is_some(), ..Default::default() };
+    let mut a: Vec<String> = vec!["-ssh".into(), "-P".into(), conn.effective_port().to_string()];
+    if let Some(c) = cred {
+        if !c.username.is_empty() {
+            a.extend(["-l".into(), c.username.clone()]);
+        }
+        if !c.password.is_empty() {
+            let file = secret_path("puttypw");
+            a.extend(["-pwfile".into(), file.to_string_lossy().into_owned()]);
+            plan.secret_files.push((file, c.password.as_bytes().to_vec()));
+        }
+    }
+    if o.x11_forwarding {
+        a.push("-X".into());
+    }
+    if o.compression {
+        a.push("-C".into());
+    }
+    if !o.identity_file.trim().is_empty() {
+        a.extend(["-i".into(), o.identity_file.trim().into()]);
+    }
+    if !o.remote_command.trim().is_empty() {
+        // PuTTY reads a remote command from a file (-m).
+        let file = secret_path("puttycmd");
+        a.extend(["-m".into(), file.to_string_lossy().into_owned()]);
+        plan.secret_files.push((file, o.remote_command.trim().as_bytes().to_vec()));
+    }
+    a.extend(split_extra(&o.extra_args)?);
+    if embed.is_some() {
+        let log = secret_path("session");
+        a.extend(["-sessionlog".into(), log.to_string_lossy().into_owned(), "-logoverwrite".into()]);
+        plan.session_log = Some(log);
+    }
+    a.push(conn.host.trim().into());
+    plan.display = format!("{putty} {}", redact(&a, &[]));
+    plan.args = a;
+    Ok(plan)
+}
+
 fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
+    if let Some(putty) = &tools.putty {
+        return plan_putty(conn, cred, putty, embed);
+    }
     let mut plan = Plan::default();
     let mut cmd: Vec<String> = Vec::new();
     let port = conn.effective_port();
@@ -554,6 +697,7 @@ fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, em
                 cmd.extend([sp.clone(), "-f".into(), file.to_string_lossy().into_owned()]);
                 plan.secret_files.push((file, password.as_bytes().to_vec()));
             }
+            None if cfg!(windows) => plan.warnings.push("PuTTY is not available – enter the password in the console.".into()),
             None => plan.warnings.push("sshpass is not installed – enter the password in the terminal.".into()),
         }
     }
@@ -596,6 +740,7 @@ fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, em
         (Some(e), Some(xterm)) => in_xterm(xterm, e, &conn.name, cmd, tools.script.as_deref().zip(log.as_deref())),
         _ => in_terminal(tools, &conn.name, cmd)?,
     };
+    plan.hide_console = cfg!(windows);
     plan.program = program;
     plan.args = args;
     plan.session_log = log;
@@ -879,6 +1024,9 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
     if let Some(dir) = &plan.working_dir {
         cmd.current_dir(dir);
     }
+    if plan.hide_console {
+        hide_console(&mut cmd);
+    }
     let mut child: Child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -936,6 +1084,7 @@ mod tests {
             freerdp: Some(("/usr/bin/xfreerdp".into(), v)),
             terminal: Some(("/usr/bin/xterm".into(), vec!["-e".into()])),
             sshpass: Some("/usr/bin/sshpass".into()),
+            putty: None,
             vncviewer: Some("/usr/bin/vncviewer".into()),
             opener: Some("/usr/bin/xdg-open".into()),
             xterm: Some("/usr/bin/xterm".into()),

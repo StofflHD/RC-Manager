@@ -119,7 +119,17 @@ fn cred_ref_from_str(s: &str) -> CredentialRef {
 }
 
 impl Store {
+    /// Portable mode (the Windows ZIP): a file `rc-manager.portable` next to the program keeps
+    /// all data in the `data` folder beside it instead of the user profile.
+    pub fn portable_dir() -> Option<PathBuf> {
+        let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+        dir.join("rc-manager.portable").is_file().then(|| dir.join("data"))
+    }
+
     pub fn default_dir() -> PathBuf {
+        if let Some(dir) = Self::portable_dir() {
+            return dir;
+        }
         dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("rc-manager")
     }
 

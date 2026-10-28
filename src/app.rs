@@ -237,8 +237,14 @@ impl Reachability {
             });
         }
         // ICMP via the system's ping (it has the needed privileges); optional.
-        let ping = launch::find_in_path("ping").and_then(|p| {
-            std::process::Command::new(p)
+        let ping_exe = if cfg!(windows) { "ping.exe" } else { "ping" };
+        let ping = launch::find_in_path(ping_exe).and_then(|p| {
+            let mut cmd = std::process::Command::new(p);
+            // Windows' ping stops after four packets unless -t is given.
+            if cfg!(windows) {
+                cmd.arg("-t");
+            }
+            launch::hide_console(&mut cmd)
                 .arg(&host)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
@@ -295,12 +301,12 @@ impl Drop for Reachability {
 /// Geometry last given to a host window: (x, y, width, height, visible) and the cut-out holes.
 type Placement = ((i32, i32, u32, u32, bool), Vec<[i32; 4]>);
 
-/// A session shown as a tab; its client draws into the X11 window `host`.
+/// A session shown as a tab; its client draws into the window `host` (X11 or Win32).
 struct SessionTab {
     session: u64,
     name: String,
     icon: &'static str,
-    host: u32,
+    host: crate::embed::WinId,
     /// TigerVNC opens its own window, which is moved into the tab once it appears.
     adopt: Option<(u32, Instant)>,
     /// Last geometry given to the host (physical pixels) and whether it was visible.
@@ -416,6 +422,8 @@ pub struct App {
     update: Option<UpdateDlg>,
     /// "Updater Proxy" dialog (edited value).
     update_proxy_edit: Option<String>,
+    /// Windows: update script to run when RC Manager exits ("Later" in the update dialog).
+    pending_update: Option<PathBuf>,
     /// AppImage to start once RC Manager has exited (restart after an update).
     restart_exe: Option<PathBuf>,
     /// Running reachability check (dialog).
@@ -611,6 +619,7 @@ impl App {
             update: None,
             update_proxy_edit: None,
             restart_exe: None,
+            pending_update: None,
             reach: None,
             session_rect: None,
             session_focus: None,
@@ -1087,7 +1096,7 @@ impl App {
         let emb = self.embedder.as_ref()?;
         let wanted = match conn.protocol {
             Protocol::Rdp => conn.options.rdp.window_mode == WindowMode::Tab,
-            Protocol::Ssh => self.tools.xterm.is_some(),
+            Protocol::Ssh => self.tools.ssh_embeddable(),
             Protocol::Vnc => self.tools.vncviewer.is_some() && emb.can_adopt(),
             Protocol::Web | Protocol::External => false,
         };
@@ -1439,7 +1448,7 @@ impl App {
     }
 
     fn start_update_install(&mut self, rel: crate::update::Release) {
-        let Some(target) = crate::update::running_appimage() else { return };
+        let Some(target) = crate::update::update_target() else { return };
         let (tx, rx) = channel();
         let ctx = self.ctx.clone();
         crate::update::spawn_install(rel, target, self.s.update_proxy.clone(), tx, move || ctx.request_repaint());
@@ -1480,7 +1489,7 @@ impl App {
                     self.push(Level::Warn, format!("Cannot open {url}: {e}"));
                 }
             }
-            None => self.push(Level::Warn, format!("No browser found (xdg-open) – open {url} yourself.")),
+            None => self.push(Level::Warn, format!("No browser found – open {url} yourself.")),
         }
     }
 
@@ -1516,7 +1525,8 @@ impl App {
             }
             #[cfg(not(unix))]
             {
-                std::process::Command::new("taskkill").args(["/PID", &s.pid.to_string()]).status().ok();
+                // Forced: PuTTY would otherwise ask whether to close the session.
+                launch::hide_console(std::process::Command::new("taskkill").args(["/F", "/T", "/PID", &s.pid.to_string()])).status().ok();
             }
         }
     }
@@ -1878,7 +1888,10 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         launch::cleanup_secret_files();
         if let Some(exe) = self.restart_exe.take() {
-            crate::update::restart_when_exited(&exe);
+            crate::update::finish_on_exit(&exe, true);
+        } else if let Some(update) = self.pending_update.take() {
+            // Windows: an update installed with "Later" is applied now, without a restart.
+            crate::update::finish_on_exit(&update, false);
         }
         if !self.locked && self.editor_dirty() {
             self.save_editor();

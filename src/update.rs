@@ -1,6 +1,8 @@
 //! Updater (Help → Check for Updates): checks the GitHub releases of the project, downloads the
-//! new AppImage, verifies its SHA-256 checksum and replaces the running AppImage file – the same
-//! updater as in notepad-rs.
+//! new package, verifies its SHA-256 checksum and installs it – the same updater as in
+//! notepad-rs. Linux: the running AppImage file is replaced. Windows: a running program cannot
+//! replace itself, so the installer (or, for the portable ZIP, the unpacked files) is applied by
+//! a small PowerShell script once RC Manager has exited.
 //!
 //! HTTP goes through `curl` (or `wget`) so the binary needs no TLS stack of its own.
 
@@ -27,8 +29,9 @@ pub struct Release {
     pub notes: String,
     pub page: String,
     pub prerelease: bool,
-    /// AppImage asset: (name, download URL, size)
-    pub appimage: Option<(String, String, u64)>,
+    /// The package for this system – AppImage, Windows installer or portable ZIP: (name,
+    /// download URL, size)
+    pub package: Option<(String, String, u64)>,
     pub checksum_url: Option<String>,
 }
 
@@ -71,26 +74,25 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 /// as the project has no final release (versions below 1.0) or when `include_pre` is set.
 pub fn newest(json: &str, include_pre: bool) -> Result<Option<Release>, String> {
     let list: Vec<GhRelease> = serde_json::from_str(json).map_err(|e| format!("GitHub: {e}"))?;
-    let arch = std::env::consts::ARCH;
+    let suffix = package_suffix();
     let best = list
         .into_iter()
         .filter(|r| !r.draft && (include_pre || !r.prerelease || parse_version(&r.tag_name).first() == Some(&0)))
         .max_by(|a, b| parse_version(&a.tag_name).cmp(&parse_version(&b.tag_name)));
     Ok(best.map(|r| {
-        let appimage = r
-            .assets
-            .iter()
-            .find(|a| a.name.ends_with(&format!("{arch}.AppImage")))
-            .or_else(|| r.assets.iter().find(|a| a.name.ends_with(".AppImage")));
+        let package = r.assets.iter().find(|a| a.name.ends_with(&suffix)).or_else(|| {
+            // Older Linux releases: any AppImage.
+            (!cfg!(windows)).then(|| r.assets.iter().find(|a| a.name.ends_with(".AppImage"))).flatten()
+        });
         let checksum_url =
-            appimage.and_then(|ai| r.assets.iter().find(|a| a.name == format!("{}.sha256", ai.name))).map(|a| a.browser_download_url.clone());
+            package.and_then(|ai| r.assets.iter().find(|a| a.name == format!("{}.sha256", ai.name))).map(|a| a.browser_download_url.clone());
         Release {
             version: r.tag_name.trim_start_matches(['v', 'V']).to_string(),
             tag: r.tag_name.clone(),
             notes: r.body.unwrap_or_default(),
             page: r.html_url,
             prerelease: r.prerelease,
-            appimage: appimage.map(|a| (a.name.clone(), a.browser_download_url.clone(), a.size)),
+            package: package.map(|a| (a.name.clone(), a.browser_download_url.clone(), a.size)),
             checksum_url,
         }
     }))
@@ -151,9 +153,27 @@ pub fn check(proxy: &str) -> Result<Option<Release>, String> {
     Ok(rel.filter(|r| is_newer(&r.version, env!("CARGO_PKG_VERSION"))))
 }
 
-/// The AppImage file this process was started from (only that can be updated in place).
-pub fn running_appimage() -> Option<PathBuf> {
-    std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file())
+/// End of the release asset that fits this installation.
+fn package_suffix() -> String {
+    if cfg!(windows) {
+        if crate::store::Store::portable_dir().is_some() {
+            "-windows-x64-portable.zip".into()
+        } else {
+            "-windows-x64-setup.exe".into()
+        }
+    } else {
+        format!("{}.AppImage", std::env::consts::ARCH)
+    }
+}
+
+/// What an update replaces: the AppImage this process was started from (Linux) or the
+/// running `rc-manager.exe` (Windows, installed or portable). `None`: no self-update.
+pub fn update_target() -> Option<PathBuf> {
+    if cfg!(windows) {
+        std::env::current_exe().ok()
+    } else {
+        std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file())
+    }
 }
 
 pub enum Msg {
@@ -182,7 +202,10 @@ pub fn new_target(target: &Path, current: &str, new: &str) -> PathBuf {
 /// Downloads the AppImage of `rel` next to `target`, verifies it and replaces `target` (renamed
 /// to the new version when its name carries the old one). Returns the path of the new AppImage.
 pub fn install(rel: &Release, target: &Path, proxy: &str) -> Result<PathBuf, String> {
-    let (name, url, _) = rel.appimage.as_ref().ok_or_else(|| "The release has no AppImage for this system.".to_string())?;
+    if cfg!(windows) {
+        return install_windows(rel, target, proxy);
+    }
+    let (name, url, _) = rel.package.as_ref().ok_or_else(|| "The release has no AppImage for this system.".to_string())?;
     let dir = target.parent().ok_or("no parent directory")?;
     let tmp = dir.join(format!(".{name}.download"));
     let _ = std::fs::remove_file(&tmp);
@@ -192,16 +215,7 @@ pub fn install(rel: &Release, target: &Path, proxy: &str) -> Result<PathBuf, Str
         if data.len() < 1024 * 1024 || &data[1..4] != b"ELF" {
             return Err("The downloaded file is not an AppImage.".to_string());
         }
-        match &rel.checksum_url {
-            Some(cu) => {
-                let sum = String::from_utf8_lossy(&http(cu, proxy, None)?).split_whitespace().next().unwrap_or("").to_lowercase();
-                let actual = format!("{:x}", Sha256::digest(&data));
-                if sum != actual {
-                    return Err(format!("Checksum mismatch (expected {sum}, got {actual})."));
-                }
-            }
-            None => return Err("The release has no checksum file; the update was not installed.".into()),
-        }
+        verify(rel, &data, proxy)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -221,6 +235,70 @@ pub fn install(rel: &Release, target: &Path, proxy: &str) -> Result<PathBuf, Str
     result
 }
 
+/// Compares the SHA-256 of `data` with the release's `.sha256` file.
+fn verify(rel: &Release, data: &[u8], proxy: &str) -> Result<(), String> {
+    match &rel.checksum_url {
+        Some(cu) => {
+            let sum = String::from_utf8_lossy(&http(cu, proxy, None)?).split_whitespace().next().unwrap_or("").to_lowercase();
+            let actual = format!("{:x}", Sha256::digest(data));
+            if sum != actual {
+                return Err(format!("Checksum mismatch (expected {sum}, got {actual})."));
+            }
+            Ok(())
+        }
+        None => Err("The release has no checksum file; the update was not installed.".into()),
+    }
+}
+
+/// A path as a single-quoted PowerShell string.
+fn ps_quote(p: &Path) -> String {
+    format!("'{}'", p.display().to_string().replace('\'', "''"))
+}
+
+/// Windows: downloads and verifies the installer or the portable ZIP and writes the script that
+/// applies it after RC Manager has exited (see `finish_on_exit`). Returns that script.
+fn install_windows(rel: &Release, exe: &Path, proxy: &str) -> Result<PathBuf, String> {
+    let (name, url, _) = rel.package.as_ref().ok_or_else(|| "The release has no Windows package for this installation.".to_string())?;
+    let dir = exe.parent().ok_or("no program directory")?;
+    let work = std::env::temp_dir().join(format!("rc-manager-update-{}", rel.version));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let file = work.join(name);
+    http(url, proxy, Some(&file))?;
+    let data = std::fs::read(&file).map_err(|e| e.to_string())?;
+    verify(rel, &data, proxy)?;
+    let mut script = String::from("param([switch]$Restart)\n");
+    script += &format!("Wait-Process -Id {} -ErrorAction SilentlyContinue\n", std::process::id());
+    if name.ends_with(".zip") {
+        if !data.starts_with(b"PK") {
+            return Err("The downloaded file is not a ZIP archive.".into());
+        }
+        // Unpacked now (errors show in the dialog), copied over the program once it has exited.
+        // The ZIP holds no `data` folder, so the user's data stays untouched.
+        let staging = work.join("files");
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&data)).map_err(|e| format!("ZIP: {e}"))?;
+        zip.extract(&staging).map_err(|e| format!("ZIP: {e}"))?;
+        if !staging.join("rc-manager.exe").is_file() {
+            return Err("The ZIP archive contains no rc-manager.exe.".into());
+        }
+        script += &format!("Copy-Item -Path (Join-Path {} '*') -Destination {} -Recurse -Force\n", ps_quote(&staging), ps_quote(dir));
+    } else {
+        if !data.starts_with(b"MZ") {
+            return Err("The downloaded file is not a Windows program.".into());
+        }
+        // Silent update of the existing installation (same AppId, same folder).
+        script += &format!(
+            "Start-Process -FilePath {} -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-' -Wait\n",
+            ps_quote(&file)
+        );
+    }
+    script += &format!("if ($Restart) {{ Start-Process -FilePath {} }}\n", ps_quote(exe));
+    script += &format!("Remove-Item -Path {} -Recurse -Force -ErrorAction SilentlyContinue\n", ps_quote(&work));
+    let path = std::env::temp_dir().join(format!("rc-manager-update-{}.ps1", rel.version));
+    std::fs::write(&path, script).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 pub fn spawn_install(rel: Release, target: PathBuf, proxy: String, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
         let _ = tx.send(Msg::Installed(install(&rel, &target, &proxy)));
@@ -228,8 +306,24 @@ pub fn spawn_install(rel: Release, target: PathBuf, proxy: String, tx: Sender<Ms
     });
 }
 
+/// Completes an installed update when RC Manager exits: Linux starts the new AppImage (only with
+/// `restart`, the file is already in place); Windows runs the script from `install_windows`,
+/// which applies the update and, with `restart`, starts RC Manager again.
+pub fn finish_on_exit(installed: &Path, restart: bool) {
+    if cfg!(windows) {
+        let mut cmd = Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"]).arg(installed);
+        if restart {
+            cmd.arg("-Restart");
+        }
+        let _ = crate::launch::hide_console(&mut cmd).spawn();
+    } else if restart {
+        restart_when_exited(installed);
+    }
+}
+
 /// Starts `exe` once this process has exited (used for "restart after update").
-pub fn restart_when_exited(exe: &Path) {
+fn restart_when_exited(exe: &Path) {
     let pid = std::process::id().to_string();
     let _ = Command::new("sh")
         .args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "sh", &pid])
@@ -267,7 +361,7 @@ mod tests {
         let r = newest(json, false).unwrap().unwrap();
         assert_eq!((r.version.as_str(), r.notes.as_str()), ("0.6.0", "notes"), "drafts are skipped");
         if std::env::consts::ARCH == "x86_64" {
-            assert_eq!(r.appimage.as_ref().unwrap().1, "https://x/a");
+            assert_eq!(r.package.as_ref().unwrap().1, "https://x/a");
             assert_eq!(r.checksum_url.as_deref(), Some("https://x/s"));
         }
         // From 1.0 on, pre-releases are only offered on request.
@@ -301,7 +395,7 @@ mod tests {
         let target = dir.join("RC-Manager.AppImage");
         std::fs::write(&target, b"old").unwrap();
         let url = |f: &str| format!("file://{}", dir.join(f).display());
-        let mut rel = Release { appimage: Some(("new.AppImage".into(), url("new.AppImage"), 0)), checksum_url: Some(url("bad.sha256")), ..Default::default() };
+        let mut rel = Release { package: Some(("new.AppImage".into(), url("new.AppImage"), 0)), checksum_url: Some(url("bad.sha256")), ..Default::default() };
         assert!(install(&rel, &target, "").unwrap_err().contains("Checksum"));
         assert_eq!(std::fs::read(&target).unwrap(), b"old", "target untouched on error");
         rel.checksum_url = Some(url("new.AppImage.sha256"));
@@ -322,6 +416,6 @@ mod live {
         let json = super::http(&format!("https://api.github.com/repos/{}/releases?per_page=20", super::repo()), "", None).unwrap();
         let rel = super::newest(&String::from_utf8_lossy(&json), false).unwrap().expect("a release");
         println!("{rel:#?}");
-        assert!(rel.appimage.is_some() && rel.checksum_url.is_some());
+        assert!(rel.package.is_some() && rel.checksum_url.is_some());
     }
 }

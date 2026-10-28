@@ -11,10 +11,18 @@
 //! the sidebar overlay covers a session, that area is cut out of the host window (SHAPE
 //! extension), so the session stays visible around it.
 //!
-//! This needs X11; on Wayland desktops RC Manager runs via XWayland (see `main.rs`).
+//! This needs X11; on Wayland desktops RC Manager runs via XWayland (see `main.rs`). On
+//! Windows the same is done with Win32 child windows (see the `windows` implementation below).
+
+/// Window id: an X11 window (32 bits) or a Win32 `HWND`.
+#[cfg(not(windows))]
+pub type WinId = u32;
+#[cfg(windows)]
+pub type WinId = u64;
 
 #[cfg(target_os = "linux")]
 mod imp {
+    use super::WinId;
     use anyhow::{Context, Result};
     use x11rb::connection::{Connection, RequestConnection};
     use x11rb::protocol::res::{self, ClientIdMask, ClientIdSpec, ConnectionExt as _};
@@ -40,7 +48,7 @@ mod imp {
     }
 
     impl Embedder {
-        pub fn connect(main: u32) -> Result<Self> {
+        pub fn connect(main: WinId) -> Result<Self> {
             let (conn, screen) = x11rb::connect(None).context("Cannot connect to the X server")?;
             let s = &conn.setup().roots[screen];
             let (root, black) = (s.root, s.black_pixel);
@@ -48,7 +56,7 @@ mod imp {
         }
 
         /// Creates an (unmapped) host window for one session.
-        pub fn create_host(&self) -> Result<u32> {
+        pub fn create_host(&self) -> Result<WinId> {
             let id = self.conn.generate_id()?;
             let aux = CreateWindowAux::new().background_pixel(self.black).event_mask(EventMask::SUBSTRUCTURE_NOTIFY);
             self.conn.create_window(
@@ -73,7 +81,7 @@ mod imp {
         /// out of it, so RC Manager's own content shows (and gets the clicks) there.
         // Position, size, visibility and holes are the natural parameters of an X11 placement.
         #[allow(clippy::too_many_arguments)]
-        pub fn place(&self, host: u32, x: i32, y: i32, w: u32, h: u32, visible: bool, holes: &[[i32; 4]]) -> Result<()> {
+        pub fn place(&self, host: WinId, x: i32, y: i32, w: u32, h: u32, visible: bool, holes: &[[i32; 4]]) -> Result<()> {
             let (w, h) = (w.max(1), h.max(1));
             self.conn.configure_window(host, &ConfigureWindowAux::new().x(x).y(y).width(w).height(h))?;
             for child in self.conn.query_tree(host)?.reply()?.children {
@@ -103,13 +111,13 @@ mod imp {
         }
 
         /// The client window inside a host, once the client has created it.
-        pub fn client_of(&self, host: u32) -> Option<u32> {
+        pub fn client_of(&self, host: WinId) -> Option<WinId> {
             self.conn.query_tree(host).ok()?.reply().ok()?.children.last().copied()
         }
 
         /// Finds the largest mapped top-level window created by `pid` (looking one level into
         /// window manager frames) using the X-Resource extension.
-        pub fn window_of_pid(&self, pid: u32) -> Option<u32> {
+        pub fn window_of_pid(&self, pid: u32) -> Option<WinId> {
             let mut candidates = Vec::new();
             for top in self.conn.query_tree(self.root).ok()?.reply().ok()?.children {
                 candidates.push(top);
@@ -138,7 +146,7 @@ mod imp {
         }
 
         /// Moves a top-level client window into a host.
-        pub fn adopt(&self, win: u32, host: u32) -> Result<()> {
+        pub fn adopt(&self, win: WinId, host: WinId) -> Result<()> {
             self.conn.unmap_window(win)?;
             self.conn.reparent_window(win, host, 0, 0)?;
             self.conn.map_window(win)?;
@@ -152,13 +160,13 @@ mod imp {
         }
 
         /// Gives the keyboard to a client window (or back to RC Manager with `None`).
-        pub fn focus(&self, win: Option<u32>) {
+        pub fn focus(&self, win: Option<WinId>) {
             let target = win.unwrap_or(self.main);
             let _ = self.conn.set_input_focus(InputFocus::PARENT, target, x11rb::CURRENT_TIME);
             let _ = self.conn.flush();
         }
 
-        pub fn destroy(&self, host: u32) {
+        pub fn destroy(&self, host: WinId) {
             let _ = self.conn.destroy_window(host);
             let _ = self.conn.flush();
         }
@@ -175,8 +183,9 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 mod imp {
+    use super::WinId;
     use anyhow::{bail, Result};
 
     pub struct Embedder;
@@ -188,29 +197,29 @@ mod imp {
     }
 
     impl Embedder {
-        pub fn connect(_main: u32) -> Result<Self> {
-            bail!("Embedding sessions needs X11")
+        pub fn connect(_main: WinId) -> Result<Self> {
+            bail!("Embedding sessions needs X11 or Windows")
         }
-        pub fn create_host(&self) -> Result<u32> {
+        pub fn create_host(&self) -> Result<WinId> {
             unreachable!()
         }
-        pub fn place(&self, _host: u32, _x: i32, _y: i32, _w: u32, _h: u32, _visible: bool, _holes: &[[i32; 4]]) -> Result<()> {
+        pub fn place(&self, _host: WinId, _x: i32, _y: i32, _w: WinId, _h: WinId, _visible: bool, _holes: &[[i32; 4]]) -> Result<()> {
             Ok(())
         }
-        pub fn client_of(&self, _host: u32) -> Option<u32> {
+        pub fn client_of(&self, _host: WinId) -> Option<WinId> {
             None
         }
-        pub fn window_of_pid(&self, _pid: u32) -> Option<u32> {
+        pub fn window_of_pid(&self, _pid: u32) -> Option<WinId> {
             None
         }
-        pub fn adopt(&self, _win: u32, _host: u32) -> Result<()> {
+        pub fn adopt(&self, _win: WinId, _host: WinId) -> Result<()> {
             Ok(())
         }
         pub fn pointer(&self) -> Option<Pointer> {
             None
         }
-        pub fn focus(&self, _win: Option<u32>) {}
-        pub fn destroy(&self, _host: u32) {}
+        pub fn focus(&self, _win: Option<WinId>) {}
+        pub fn destroy(&self, _host: WinId) {}
         pub fn can_adopt(&self) -> bool {
             false
         }
@@ -220,14 +229,242 @@ mod imp {
     }
 }
 
+#[cfg(windows)]
+mod imp {
+    //! Win32: every tab gets a child window of RC Manager's window. FreeRDP draws into it
+    //! (`/parent-window`), PuTTY and TigerVNC are moved into it with `SetParent`. Covered areas
+    //! are cut out with a window region (the counterpart of the X11 SHAPE extension).
+    use super::WinId;
+    use anyhow::{bail, Result};
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, GetStockObject, ScreenToClient, SetWindowRgn, BLACK_BRUSH, RGN_DIFF};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus, VK_LBUTTON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    pub struct Embedder {
+        main: HWND,
+    }
+
+    /// Pointer position relative to RC Manager's window and whether the left button is down.
+    pub struct Pointer {
+        pub x: i32,
+        pub y: i32,
+        pub pressed: bool,
+    }
+
+    fn hwnd(id: WinId) -> HWND {
+        id as usize as HWND
+    }
+
+    fn id(h: HWND) -> WinId {
+        h as usize as WinId
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    const HOST_CLASS: &str = "RcManagerSessionHost";
+
+    /// Direct child windows of `parent` (the client windows inside a host).
+    fn children(parent: HWND) -> Vec<HWND> {
+        let mut out = Vec::new();
+        unsafe {
+            let mut c = GetWindow(parent, GW_CHILD);
+            while !c.is_null() {
+                out.push(c);
+                c = GetWindow(c, GW_HWNDNEXT);
+            }
+        }
+        out
+    }
+
+    fn class_name(w: HWND) -> String {
+        let mut buf = [0u16; 128];
+        let n = unsafe { GetClassNameW(w, buf.as_mut_ptr(), buf.len() as i32) };
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    }
+
+    impl Embedder {
+        pub fn connect(main: WinId) -> Result<Self> {
+            let main = hwnd(main);
+            unsafe {
+                if IsWindow(main) == 0 {
+                    bail!("RC Manager's window handle is not valid");
+                }
+                // RC Manager's own drawing must not paint over the session windows.
+                let style = GetWindowLongPtrW(main, GWL_STYLE);
+                SetWindowLongPtrW(main, GWL_STYLE, style | (WS_CLIPCHILDREN as isize));
+                let class = wide(HOST_CLASS);
+                let wc = WNDCLASSEXW {
+                    cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                    style: 0,
+                    lpfnWndProc: Some(DefWindowProcW),
+                    cbClsExtra: 0,
+                    cbWndExtra: 0,
+                    hInstance: GetModuleHandleW(std::ptr::null()),
+                    hIcon: std::ptr::null_mut(),
+                    hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                    hbrBackground: GetStockObject(BLACK_BRUSH) as _,
+                    lpszMenuName: std::ptr::null(),
+                    lpszClassName: class.as_ptr(),
+                    hIconSm: std::ptr::null_mut(),
+                };
+                // A second registration (e.g. after a re-detection) fails harmlessly.
+                RegisterClassExW(&wc);
+            }
+            Ok(Self { main })
+        }
+
+        /// Creates an (invisible) host window for one session.
+        pub fn create_host(&self) -> Result<WinId> {
+            let class = wide(HOST_CLASS);
+            let h = unsafe {
+                CreateWindowExW(
+                    0,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    0,
+                    0,
+                    64,
+                    64,
+                    self.main,
+                    std::ptr::null_mut(),
+                    GetModuleHandleW(std::ptr::null()),
+                    std::ptr::null(),
+                )
+            };
+            if h.is_null() {
+                bail!("Cannot create a window for the session (error {})", std::io::Error::last_os_error());
+            }
+            Ok(id(h))
+        }
+
+        /// Moves/resizes the host (physical pixels, relative to RC Manager's window) and makes
+        /// every client window inside fill it. `holes` (relative to the host) are cut out of it,
+        /// so RC Manager's own content shows (and gets the clicks) there.
+        #[allow(clippy::too_many_arguments)]
+        pub fn place(&self, host: WinId, x: i32, y: i32, w: u32, h: u32, visible: bool, holes: &[[i32; 4]]) -> Result<()> {
+            let host = hwnd(host);
+            let (w, h) = (w.max(1) as i32, h.max(1) as i32);
+            unsafe {
+                SetWindowPos(host, HWND_TOP, x, y, w, h, SWP_NOACTIVATE);
+                for c in children(host) {
+                    SetWindowPos(c, std::ptr::null_mut(), 0, 0, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+                }
+                if holes.is_empty() {
+                    SetWindowRgn(host, std::ptr::null_mut(), 1);
+                } else {
+                    // The system owns the region after SetWindowRgn; the holes are freed here.
+                    let rgn = CreateRectRgn(0, 0, w, h);
+                    for &[hx, hy, hw, hh] in holes {
+                        let hole = CreateRectRgn(hx, hy, hx + hw.max(0), hy + hh.max(0));
+                        CombineRgn(rgn, rgn, hole, RGN_DIFF);
+                        DeleteObject(hole);
+                    }
+                    SetWindowRgn(host, rgn, 1);
+                }
+                ShowWindow(host, if visible { SW_SHOWNA } else { SW_HIDE });
+            }
+            Ok(())
+        }
+
+        /// The client window inside a host, once the client has created it.
+        pub fn client_of(&self, host: WinId) -> Option<WinId> {
+            children(hwnd(host)).first().map(|&c| id(c))
+        }
+
+        /// Finds the largest visible top-level window of `pid` – not a dialog (PuTTY's host key
+        /// question or TigerVNC's password prompt stay separate windows until answered).
+        pub fn window_of_pid(&self, pid: u32) -> Option<WinId> {
+            struct Search {
+                pid: u32,
+                best: Option<(HWND, i64)>,
+            }
+            unsafe extern "system" fn each(w: HWND, data: LPARAM) -> BOOL {
+                let s = &mut *(data as *mut Search);
+                let mut owner = 0u32;
+                GetWindowThreadProcessId(w, &mut owner);
+                if owner == s.pid && IsWindowVisible(w) != 0 && class_name(w) != "#32770" {
+                    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                    GetWindowRect(w, &mut r);
+                    let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
+                    if area > s.best.map(|b| b.1).unwrap_or(0) {
+                        s.best = Some((w, area));
+                    }
+                }
+                1
+            }
+            let mut s = Search { pid, best: None };
+            unsafe { EnumWindows(Some(each), &mut s as *mut Search as LPARAM) };
+            s.best.map(|b| id(b.0))
+        }
+
+        /// Moves a top-level client window into a host: it becomes a borderless child.
+        pub fn adopt(&self, win: WinId, host: WinId) -> Result<()> {
+            let (win, host) = (hwnd(win), hwnd(host));
+            unsafe {
+                let style = GetWindowLongPtrW(win, GWL_STYLE) as u32;
+                let style = (style & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_CHILD;
+                SetWindowLongPtrW(win, GWL_STYLE, style as isize);
+                let ex = GetWindowLongPtrW(win, GWL_EXSTYLE) as u32;
+                SetWindowLongPtrW(win, GWL_EXSTYLE, (ex & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME)) as isize);
+                if SetParent(win, host).is_null() {
+                    bail!("SetParent failed ({})", std::io::Error::last_os_error());
+                }
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetClientRect(host, &mut r);
+                SetWindowPos(win, std::ptr::null_mut(), 0, 0, r.right, r.bottom, SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            }
+            Ok(())
+        }
+
+        pub fn pointer(&self) -> Option<Pointer> {
+            unsafe {
+                let mut p = POINT { x: 0, y: 0 };
+                if GetCursorPos(&mut p) == 0 || ScreenToClient(self.main, &mut p) == 0 {
+                    return None;
+                }
+                let pressed = (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0;
+                Some(Pointer { x: p.x, y: p.y, pressed })
+            }
+        }
+
+        /// Gives the keyboard to a client window (or back to RC Manager with `None`). Child
+        /// windows of other processes share RC Manager's input queue, so SetFocus works.
+        pub fn focus(&self, win: Option<WinId>) {
+            let target = win.map(hwnd).unwrap_or(self.main);
+            unsafe { SetFocus(target) };
+        }
+
+        pub fn destroy(&self, host: WinId) {
+            unsafe { DestroyWindow(hwnd(host)) };
+        }
+
+        pub fn can_adopt(&self) -> bool {
+            true
+        }
+
+        pub fn can_shape(&self) -> bool {
+            true
+        }
+    }
+}
+
 pub use imp::Embedder;
 
-/// X11 window id of RC Manager's own window, if it runs on X11 (or XWayland).
-pub fn main_window(frame: &eframe::Frame) -> Option<u32> {
+/// Window id of RC Manager's own window: X11 (or XWayland) or Win32.
+pub fn main_window(frame: &eframe::Frame) -> Option<WinId> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match frame.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Xlib(h) => u32::try_from(h.window).ok(),
+        #[cfg(not(windows))]
+        RawWindowHandle::Xlib(h) => WinId::try_from(h.window).ok(),
+        #[cfg(not(windows))]
         RawWindowHandle::Xcb(h) => Some(h.window.get()),
+        #[cfg(windows)]
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as usize as WinId),
         _ => None,
     }
 }

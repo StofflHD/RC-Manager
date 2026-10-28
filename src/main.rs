@@ -1,4 +1,9 @@
-//! RC Manager for Linux – a re-implementation of the Windows program "RDP-Manager" (Cinspiration).
+//! RC Manager for Linux and Windows – a re-implementation of the Windows program "RDP-Manager"
+//! (Cinspiration).
+
+// Windows: a GUI program without a console window (command-line options attach to the console
+// they were started from, see `attach_console`).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod embed;
@@ -29,7 +34,19 @@ fn usage() {
     );
 }
 
+/// Windows: output of command-line options (--help, --list, --tools …) goes to the console
+/// RC Manager was started from.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    if std::env::args().len() > 1 {
+        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    attach_console();
     // AppRun preloads the system's libxkbcommon for RC Manager only; launched clients use
     // their own libraries.
     if std::env::var_os("RC_MANAGER_UNSET_PRELOAD").is_some() {
@@ -67,7 +84,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    if !custom_dir {
+    if !custom_dir && store::Store::portable_dir().is_none() {
         if let Err(e) = store::Store::migrate_legacy_dir() {
             eprintln!("Warning: could not move the old data directory: {e}");
         }
@@ -109,8 +126,11 @@ fn main() -> anyhow::Result<()> {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/rc-manager.png")) {
         viewport = viewport.with_icon(icon);
     }
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    // Portable: the window settings stay with the data next to the program, too.
+    if store::Store::portable_dir().is_some() {
+        options.persistence_path = Some(data_dir.join("app.ron"));
+    }
     // Sessions are embedded as X11 child windows; on Wayland desktops RC Manager therefore
     // runs via XWayland (set RC_MANAGER_WAYLAND=1 for native Wayland, sessions then open in
     // separate windows).
