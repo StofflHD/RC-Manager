@@ -1,8 +1,9 @@
 # RC Manager
 
-RC Manager (Remote Connection Manager) is a Rust re-implementation of the Windows program **RDP-Manager 4.9.9.3** (Cinspiration) for Linux:
-a connection manager with a folder tree, stored credentials and quick connect. The sessions
-themselves run in the established Linux clients (FreeRDP, OpenSSH, TigerVNC, your browser).
+RC Manager (Remote Connection Manager) is a Rust re-implementation of the Windows program **RDP-Manager 4.9.9.3** (Cinspiration) for Linux
+and Windows: a connection manager with a folder tree, stored credentials and quick connect. The
+sessions themselves run in established clients – FreeRDP, OpenSSH/xterm or PuTTY, TigerVNC and
+your browser – embedded as tabs in RC Manager's window.
 
 Look and feel (the "Rust" colour scheme with light and dark theme, icon style) match
 [notepad-rs](https://github.com/StofflHD/notepad-rs) and the
@@ -90,9 +91,30 @@ RC Manager checks the GitHub releases at start (at most once a day; *Help → Ch
 at Start* turns this off) and on *Help → Check for Updates …*. An update downloads the new
 AppImage next to the running one, installs it only if its SHA-256 matches the `.sha256` file of
 the release, replaces the old file (a version number in the file name is updated) and offers a
-restart. Downloads use `curl` or `wget`; *Help → Updater Proxy …* sets a proxy.
+restart. On Windows the installer or portable ZIP is downloaded and verified the same way and
+applied when RC Manager exits (see below). Downloads use `curl` or `wget`; *Help → Updater Proxy …* sets a proxy.
 `RC_MANAGER_NO_UPDATE=1` disables the automatic check. Without an AppImage (e.g. a self-built
 binary) the dialog links to the release page.
+
+## Installation (Windows)
+
+Two packages for Windows 10/11 (x64), both with **FreeRDP 3** (`wfreerdp`), **PuTTY** and the
+**TigerVNC** viewer in the folder `clients` next to `rc-manager.exe`:
+
+* `RC-Manager-<version>-windows-x64-setup.exe` – installer with a Start menu entry. It installs
+  for the current user without administrator rights (an installation for all users can be
+  chosen in the setup).
+* `RC-Manager-<version>-windows-x64-portable.zip` – unpack anywhere (e.g. a USB stick) and start
+  `rc-manager.exe`. The file `rc-manager.portable` keeps all data and settings in the folder
+  `data` next to it.
+
+Sessions open as tabs like on Linux: FreeRDP draws into the tab, PuTTY's and TigerVNC's windows
+are moved into it. The installed version stores its data in `%APPDATA%\rc-manager`. FreeRDP's
+Windows client is built from source with a small patch (`packaging/windows/patch-freerdp.py`):
+when RC Manager starts it, it asks certificate and logon questions on its console instead of
+in its own message boxes, so RC Manager's certificate dialog and trusted-fingerprint store apply
+as on Linux. The updater replaces the installation (silent setup) or the files of the portable
+folder once RC Manager has exited; the `data` folder stays untouched.
 
 ## Running without the AppImage
 

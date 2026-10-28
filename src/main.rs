@@ -1,4 +1,9 @@
-//! RC Manager for Linux – a re-implementation of the Windows program "RDP-Manager" (Cinspiration).
+//! RC Manager for Linux and Windows – a re-implementation of the Windows program "RDP-Manager"
+//! (Cinspiration).
+
+// Windows: a GUI program without a console window (command-line options attach to the console
+// they were started from, see `attach_console`).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
 mod embed;
@@ -29,7 +34,19 @@ fn usage() {
     );
 }
 
+/// Windows: output of command-line options (--help, --list, --tools …) goes to the console
+/// RC Manager was started from.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    if std::env::args().len() > 1 {
+        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    attach_console();
     // AppRun preloads the system's libxkbcommon for RC Manager only; launched clients use
     // their own libraries.
     if std::env::var_os("RC_MANAGER_UNSET_PRELOAD").is_some() {
@@ -67,7 +84,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    if !custom_dir {
+    if !custom_dir && store::Store::portable_dir().is_none() {
         if let Err(e) = store::Store::migrate_legacy_dir() {
             eprintln!("Warning: could not move the old data directory: {e}");
         }
@@ -109,8 +126,12 @@ fn main() -> anyhow::Result<()> {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/rc-manager.png")) {
         viewport = viewport.with_icon(icon);
     }
-    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    // OpenGL first (with the wgpu feature on Windows eframe would otherwise start with wgpu).
+    let mut options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
+    // Portable: the window settings stay with the data next to the program, too.
+    if store::Store::portable_dir().is_some() {
+        options.persistence_path = Some(data_dir.join("app.ron"));
+    }
     // Sessions are embedded as X11 child windows; on Wayland desktops RC Manager therefore
     // runs via XWayland (set RC_MANAGER_WAYLAND=1 for native Wayland, sessions then open in
     // separate windows).
@@ -121,6 +142,25 @@ fn main() -> anyhow::Result<()> {
             builder.with_x11();
         }));
     }
-    eframe::run_native("RC Manager", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, store, tools, connect)))))
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    // What App::new takes, kept so that a second renderer can still create the app.
+    type Start = std::rc::Rc<std::cell::RefCell<Option<(store::Store, launch::Tools, Vec<String>)>>>;
+    let start: Start = std::rc::Rc::new(std::cell::RefCell::new(Some((store, tools, connect))));
+    let creator = |start: Start| -> eframe::AppCreator<'static> {
+        Box::new(move |cc| {
+            let (store, tools, connect) = start.borrow_mut().take().expect("the app is created once");
+            Ok(Box::new(app::App::new(cc, store, tools, connect)))
+        })
+    };
+    // Windows without OpenGL 2 (virtual machines, servers, some remote sessions): Direct3D via
+    // wgpu instead – eframe keeps its event loop, so the second attempt can open a window again.
+    #[cfg(windows)]
+    let fallback = options.clone();
+    let result = eframe::run_native("RC Manager", options, creator(start.clone()));
+    #[cfg(windows)]
+    if result.is_err() && start.borrow().is_some() {
+        eprintln!("OpenGL failed ({}), trying Direct3D", result.as_ref().err().map(|e| e.to_string()).unwrap_or_default());
+        let options = eframe::NativeOptions { renderer: eframe::Renderer::Wgpu, ..fallback };
+        return eframe::run_native("RC Manager", options, creator(start)).map_err(|e| anyhow::anyhow!("{e}"));
+    }
+    result.map_err(|e| anyhow::anyhow!("{e}"))
 }

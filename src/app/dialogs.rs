@@ -27,7 +27,7 @@ impl App {
         }
         let Some(dlg) = self.update.take() else { return };
         let mut keep = true;
-        // 1 install, 2 release page, 3 skip, 4 restart
+        // 1 install, 2 release page, 3 skip, 4 restart, 5 later
         let mut action: Option<u8> = None;
         let current = env!("CARGO_PKG_VERSION");
         let sessions = self.sessions.len();
@@ -62,14 +62,14 @@ impl App {
                             });
                         });
                     }
-                    let appimage = crate::update::running_appimage();
-                    if appimage.is_none() {
+                    let target = crate::update::update_target();
+                    if target.is_none() {
                         ui.label(RichText::new("Not started from an AppImage: download the new version from the release page.").weak());
-                    } else if rel.appimage.is_none() {
-                        ui.label(RichText::new("The release has no AppImage for this system.").weak());
+                    } else if rel.package.is_none() {
+                        ui.label(RichText::new("The release has no package for this system.").weak());
                     }
                     ui.horizontal(|ui| {
-                        if appimage.is_some() && rel.appimage.is_some() && ui.button("Update now").clicked() {
+                        if target.is_some() && rel.package.is_some() && ui.button("Update now").clicked() {
                             action = Some(1);
                         }
                         if ui.button("Open release page").clicked() {
@@ -84,8 +84,13 @@ impl App {
                     });
                 }
                 UpdateState::Installed(p) => {
-                    ui.label("The update has been installed. It takes effect after a restart.");
-                    ui.label(RichText::new(p.display().to_string()).weak());
+                    if cfg!(windows) {
+                        // A running program cannot replace itself: applied when RC Manager exits.
+                        ui.label("The update has been downloaded and verified. It is installed when RC Manager restarts (or exits).");
+                    } else {
+                        ui.label("The update has been installed. It takes effect after a restart.");
+                        ui.label(RichText::new(p.display().to_string()).weak());
+                    }
                     if sessions > 0 {
                         ui.colored_label(ui.visuals().warn_fg_color, format!("A restart closes the {sessions} open session(s)."));
                     }
@@ -94,7 +99,7 @@ impl App {
                             action = Some(4);
                         }
                         if ui.button("Later").clicked() {
-                            keep = false;
+                            action = Some(5);
                         }
                     });
                 }
@@ -138,6 +143,13 @@ impl App {
             (Some(4), UpdateState::Installed(p)) => {
                 self.restart_exe = Some(p.clone());
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                keep = false;
+            }
+            (Some(5), UpdateState::Installed(p)) => {
+                // Linux: already in place. Windows: applied when RC Manager exits.
+                if cfg!(windows) {
+                    self.pending_update = Some(p.clone());
+                }
                 keep = false;
             }
             _ => {}
@@ -427,14 +439,15 @@ impl App {
                     }
                 });
                 ui.add_space(6.0);
-                ui.label(
-                    RichText::new(
-                        "Debian/Ubuntu: sudo apt install freerdp3-x11 tigervnc-viewer sshpass\n\
-                         Fedora:        sudo dnf install freerdp tigervnc sshpass\n\
-                         Arch:          sudo pacman -S freerdp tigervnc sshpass",
-                    )
-                    .monospace(),
-                );
+                let hint = if cfg!(windows) {
+                    "The installer and the portable ZIP of RC Manager include FreeRDP, PuTTY and the TigerVNC\n\
+                     viewer (folder \"clients\" next to rc-manager.exe). Installed copies are used otherwise."
+                } else {
+                    "Debian/Ubuntu: sudo apt install freerdp3-x11 tigervnc-viewer sshpass\n\
+                     Fedora:        sudo dnf install freerdp tigervnc sshpass\n\
+                     Arch:          sudo pacman -S freerdp tigervnc sshpass"
+                };
+                ui.label(RichText::new(hint).monospace());
             });
             self.show_tools = open;
         }
