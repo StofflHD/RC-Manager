@@ -258,14 +258,23 @@ impl Store {
     fn load_folders(&self) -> Result<Vec<Folder>> {
         let mut stmt = self.db.prepare("SELECT id, parent, name, description, sorting, expanded, credential FROM folders")?;
         let rows = stmt.query_map([], |r| {
+            let parent = uuid_opt(r.get(1)?);
+            // The column held a bare UUID or NULL before folders used a CredentialRef. A NULL
+            // meant "no own credential" and connections then inherited through it, so migrate a
+            // nested folder to Inherit (and a top-level one to None) to keep that behaviour.
+            let credential = match r.get::<_, Option<String>>(6)? {
+                Some(s) => cred_ref_from_str(&s),
+                None if parent.is_some() => CredentialRef::Inherit,
+                None => CredentialRef::None,
+            };
             Ok(Folder {
                 id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
-                parent: uuid_opt(r.get(1)?),
+                parent,
                 name: r.get(2)?,
                 description: r.get(3)?,
                 sorting: r.get(4)?,
                 expanded: r.get::<_, i64>(5)? != 0,
-                credential: uuid_opt(r.get(6)?),
+                credential,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -320,7 +329,7 @@ impl Store {
     pub fn save_folder(&self, f: &Folder) -> Result<()> {
         self.db.execute(
             "INSERT OR REPLACE INTO folders (id, parent, name, description, sorting, expanded, credential) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![f.id.to_string(), f.parent.map(|p| p.to_string()), f.name, f.description, f.sorting, f.expanded as i64, f.credential.map(|c| c.to_string())],
+            params![f.id.to_string(), f.parent.map(|p| p.to_string()), f.name, f.description, f.sorting, f.expanded as i64, cred_ref_to_str(f.credential)],
         )?;
         Ok(())
     }
@@ -386,7 +395,7 @@ impl Store {
         let s = id.to_string();
         self.db.execute("DELETE FROM credentials WHERE id = ?1", [&s])?;
         self.db.execute("UPDATE connections SET credential = 'none' WHERE credential = ?1", [&s])?;
-        self.db.execute("UPDATE folders SET credential = NULL WHERE credential = ?1", [&s])?;
+        self.db.execute("UPDATE folders SET credential = 'none' WHERE credential = ?1", [&s])?;
         Ok(())
     }
 

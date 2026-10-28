@@ -58,14 +58,59 @@ impl Protocol {
     }
 }
 
-/// Where a connection takes its credentials from (like `CredentialSource` in the original).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+/// Where a connection or folder takes its credentials from (like `CredentialSource` in the
+/// original). A folder with `Inherit` takes them from its parent folder (recursively), which is
+/// how nested folders share one set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub enum CredentialRef {
     #[default]
     None,
     /// Inherit from the parent folder (recursively).
     Inherit,
     Id(Uuid),
+}
+
+// Accept both the current form (serde enum: "None"/"Inherit"/{"Id":…}) and the legacy form a
+// folder used before it became a `CredentialRef` (a bare UUID string, or null for "none"), so
+// older database exports still import.
+impl<'de> Deserialize<'de> for CredentialRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = CredentialRef;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a credential reference")
+            }
+            fn visit_unit<E>(self) -> Result<CredentialRef, E> {
+                Ok(CredentialRef::None)
+            }
+            fn visit_none<E>(self) -> Result<CredentialRef, E> {
+                Ok(CredentialRef::None)
+            }
+            fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<CredentialRef, D::Error> {
+                d.deserialize_any(V)
+            }
+            fn visit_str<E>(self, s: &str) -> Result<CredentialRef, E> {
+                Ok(match s {
+                    "none" | "None" => CredentialRef::None,
+                    "inherit" | "Inherit" => CredentialRef::Inherit,
+                    _ => Uuid::parse_str(s).map(CredentialRef::Id).unwrap_or(CredentialRef::None),
+                })
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<CredentialRef, A::Error> {
+                let mut id = None;
+                while let Some(k) = m.next_key::<String>()? {
+                    if k == "Id" {
+                        id = Some(m.next_value::<Uuid>()?);
+                    } else {
+                        let _: serde::de::IgnoredAny = m.next_value()?;
+                    }
+                }
+                Ok(id.map(CredentialRef::Id).unwrap_or(CredentialRef::None))
+            }
+        }
+        d.deserialize_any(V)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -220,13 +265,15 @@ pub struct Folder {
     pub description: String,
     pub sorting: i64,
     pub expanded: bool,
-    /// Credentials inherited by connections with `CredentialRef::Inherit`.
-    pub credential: Option<Uuid>,
+    /// Credentials used by connections (and sub-folders) that inherit. `Inherit` takes them from
+    /// the parent folder, so nested folders can share one set; `None` stops the inheritance here.
+    pub credential: CredentialRef,
 }
 
 impl Folder {
     pub fn new(name: &str, parent: Option<Uuid>) -> Self {
-        Self { id: Uuid::new_v4(), parent, name: name.into(), description: String::new(), sorting: 0, expanded: true, credential: None }
+        let credential = if parent.is_some() { CredentialRef::Inherit } else { CredentialRef::None };
+        Self { id: Uuid::new_v4(), parent, name: name.into(), description: String::new(), sorting: 0, expanded: true, credential }
     }
 }
 

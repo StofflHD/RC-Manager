@@ -253,12 +253,9 @@ impl App {
                             Self::folder_combo(ui, "folder_parent", &mut f.parent, &choices);
                             ui.end_row();
                             ui.label("Credentials for\nconnections inside");
-                            let mut r = f.credential.map(CredentialRef::Id).unwrap_or_default();
-                            Self::credential_combo(ui, "folder_cred", &mut r, &self.data.credentials, false, None);
-                            f.credential = match r {
-                                CredentialRef::Id(id) => Some(id),
-                                _ => None,
-                            };
+                            // A nested folder may inherit the set from its parent folder.
+                            let inherited = self.inherited_credential(f.parent);
+                            Self::credential_combo(ui, "folder_cred", &mut f.credential, &self.data.credentials, f.parent.is_some(), inherited.as_ref());
                             ui.end_row();
                             ui.label("Sort order");
                             ui.add(egui::DragValue::new(&mut f.sorting));
