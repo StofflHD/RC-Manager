@@ -126,7 +126,8 @@ fn main() -> anyhow::Result<()> {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../packaging/rc-manager.png")) {
         viewport = viewport.with_icon(icon);
     }
-    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    // OpenGL first (with the wgpu feature on Windows eframe would otherwise start with wgpu).
+    let mut options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
     // Portable: the window settings stay with the data next to the program, too.
     if store::Store::portable_dir().is_some() {
         options.persistence_path = Some(data_dir.join("app.ron"));
