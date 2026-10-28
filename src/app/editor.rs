@@ -92,17 +92,24 @@ impl App {
         egui::ScrollArea::horizontal().id_salt("session_tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                for (i, t) in tabs.iter().enumerate() {
-                    if i > 0 {
-                        ui.separator();
-                    }
+                for t in tabs.iter() {
                     let sel = self.active_tab == Some(t.session);
-                    let label = if t.ended_conn.is_some() { format!("{} {} ⚠", t.icon, t.name) } else { format!("{} {}", t.icon, t.name) };
-                    let text = RichText::new(label);
-                    let text = if t.ended_conn.is_some() { text.weak() } else { text };
+                    let ended = t.ended_conn.is_some();
+                    let label = if ended { format!("{} {} ⚠", t.icon, t.name) } else { format!("{} {}", t.icon, t.name) };
+                    // Each tab is a chip in a fitting colour (see theme::tab_colors), so the strip
+                    // stands off the panel. Laid out by hand to paint the background and border.
+                    let font = egui::TextStyle::Button.resolve(ui.style());
+                    // PLACEHOLDER lets painter.galley() set the colour per tab state below.
+                    let galley = ui.painter().layout_no_wrap(label, font, egui::Color32::PLACEHOLDER);
+                    let pad = egui::vec2(9.0, 4.0);
+                    let size = galley.size() + 2.0 * pad;
                     // A stable id per session keeps the drag attached while the order changes.
-                    let r = ui.push_id(t.session, |ui| ui.add(egui::SelectableLabel::new(sel, if sel { text.strong() } else { text }))).inner;
-                    let r = r.interact(egui::Sense::click_and_drag());
+                    let r = ui.push_id(t.session, |ui| ui.allocate_response(size, egui::Sense::click_and_drag())).inner;
+                    let (bg, fg, border) = theme::tab_colors(self.s.dark, sel, r.hovered(), ended);
+                    let rounding = egui::Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 };
+                    ui.painter().rect(r.rect, rounding, bg, border);
+                    let text_pos = egui::pos2(r.rect.left() + pad.x, r.rect.center().y - galley.size().y / 2.0);
+                    ui.painter().galley(text_pos, galley, fg);
                     rects.push(r.rect);
                     if r.dragged() {
                         dragging = Some(t.session);

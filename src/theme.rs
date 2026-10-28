@@ -149,6 +149,24 @@ pub fn session_colors(dark: bool) -> (Color32, Color32) {
     }
 }
 
+/// Background, text colour and border for a session tab, so the tabs read as chips that stand off
+/// the panel: the active one in the warm selection tone with an accent border, the others on the
+/// button surface. `ended` tabs (the session dropped) keep a faded label.
+pub fn tab_colors(dark: bool, active: bool, hovered: bool, ended: bool) -> (Color32, Color32, Stroke) {
+    let p = if dark { &DARK } else { &LIGHT };
+    let (bg, mut fg, border) = if active {
+        (p.selection, p.selection_text, Stroke::new(1.5_f32, p.accent))
+    } else if hovered {
+        (p.hover, p.strong, Stroke::new(1.0_f32, p.accent))
+    } else {
+        (p.button, p.text, Stroke::new(1.0_f32, p.border))
+    };
+    if ended && !active {
+        fg = p.weak;
+    }
+    (bg, fg, border)
+}
+
 /// The application icon (`packaging/make_icon.py`), loaded once per context.
 fn logo(ctx: &egui::Context) -> egui::TextureHandle {
     let id = egui::Id::new("rc-manager-logo");
