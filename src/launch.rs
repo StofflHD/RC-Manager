@@ -142,7 +142,7 @@ impl Tools {
         let program_files = |rel: &str| {
             ["ProgramFiles", "ProgramFiles(x86)"]
                 .iter()
-                .filter_map(|v| std::env::var_os(v))
+                .filter_map(std::env::var_os)
                 .map(|d| PathBuf::from(d).join(rel))
                 .find(|p| p.is_file())
                 .map(|p| p.to_string_lossy().into_owned())
