@@ -232,12 +232,13 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     //! Win32: every tab gets a child window of RC Manager's window. FreeRDP draws into it
-    //! (`/parent-window`), PuTTY and TigerVNC are moved into it with `SetParent`. Covered areas
-    //! are cut out with a window region (the counterpart of the X11 SHAPE extension).
+    //! (`/parent-window`), PuTTY and TigerVNC are moved into it with `SetParent` and keep their
+    //! frame, which lies outside the host and is cut off (as in the original RDP-Manager).
+    //! Covered areas are cut out with a window region (the counterpart of the X11 SHAPE extension).
     use super::WinId;
     use anyhow::{bail, Result};
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
-    use windows_sys::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, GetStockObject, ScreenToClient, SetWindowRgn, BLACK_BRUSH, RGN_DIFF};
+    use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, GetStockObject, ScreenToClient, SetWindowRgn, BLACK_BRUSH, RGN_DIFF};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus, VK_LBUTTON};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
@@ -286,18 +287,38 @@ mod imp {
         String::from_utf16_lossy(&buf[..n.max(0) as usize])
     }
 
-    /// Makes a window a borderless child window; true if its styles had to be changed.
-    unsafe fn strip_frame(win: HWND) -> bool {
-        let old = GetWindowLongPtrW(win, GWL_STYLE) as u32;
-        let style = (old & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_CHILD;
-        let old_ex = GetWindowLongPtrW(win, GWL_EXSTYLE) as u32;
-        let ex = old_ex & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME);
-        if style == old && ex == old_ex {
-            return false;
+    /// Turns an adopted top-level window into a child window. Its frame stays: clients such as
+    /// PuTTY restore a removed one, so `fit` moves it out of sight instead.
+    unsafe fn make_child(win: HWND) {
+        let style = GetWindowLongPtrW(win, GWL_STYLE) as u32;
+        SetWindowLongPtrW(win, GWL_STYLE, ((style & !WS_POPUP) | WS_CHILD) as isize);
+        let ex = GetWindowLongPtrW(win, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(win, GWL_EXSTYLE, (ex & !WS_EX_APPWINDOW) as isize);
+    }
+
+    /// Places a client window so that its client area (and scroll bar) fills a `w`×`h` host:
+    /// title bar and frame lie outside the host, which clips them away.
+    unsafe fn fit(win: HWND, w: i32, h: i32) {
+        let mut wr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut cr = wr;
+        let mut origin = POINT { x: 0, y: 0 };
+        let (mut left, mut top, mut right, mut bottom) = (0, 0, 0, 0);
+        if GetWindowRect(win, &mut wr) != 0 && GetClientRect(win, &mut cr) != 0 && ClientToScreen(win, &mut origin) != 0 {
+            left = origin.x - wr.left;
+            top = origin.y - wr.top;
+            right = wr.right - origin.x - cr.right;
+            bottom = wr.bottom - origin.y - cr.bottom;
+            // Scroll bars belong to the non-client area, but stay visible.
+            let style = GetWindowLongPtrW(win, GWL_STYLE) as u32;
+            if style & WS_VSCROLL != 0 {
+                right -= GetSystemMetrics(SM_CXVSCROLL);
+            }
+            if style & WS_HSCROLL != 0 {
+                bottom -= GetSystemMetrics(SM_CYHSCROLL);
+            }
         }
-        SetWindowLongPtrW(win, GWL_STYLE, style as isize);
-        SetWindowLongPtrW(win, GWL_EXSTYLE, ex as isize);
-        true
+        let (left, top, right, bottom) = (left.max(0), top.max(0), right.max(0), bottom.max(0));
+        SetWindowPos(win, std::ptr::null_mut(), -left, -top, w + left + right, h + top + bottom, SWP_NOACTIVATE | SWP_NOZORDER);
     }
 
     impl Embedder {
@@ -366,10 +387,7 @@ mod imp {
             unsafe {
                 SetWindowPos(host, HWND_TOP, x, y, w, h, SWP_NOACTIVATE);
                 for c in children(host) {
-                    // Some clients (PuTTY) restore their frame after being adopted.
-                    let frame = strip_frame(c);
-                    let flags = if frame { SWP_FRAMECHANGED } else { 0 };
-                    SetWindowPos(c, std::ptr::null_mut(), 0, 0, w, h, SWP_NOACTIVATE | SWP_NOZORDER | flags);
+                    fit(c, w, h);
                 }
                 if holes.is_empty() {
                     SetWindowRgn(host, std::ptr::null_mut(), 1);
@@ -419,17 +437,18 @@ mod imp {
             s.best.map(|b| id(b.0))
         }
 
-        /// Moves a top-level client window into a host: it becomes a borderless child.
+        /// Moves a top-level client window into a host: it becomes a child window, its frame clipped away.
         pub fn adopt(&self, win: WinId, host: WinId) -> Result<()> {
             let (win, host) = (hwnd(win), hwnd(host));
             unsafe {
-                strip_frame(win);
+                make_child(win);
                 if SetParent(win, host).is_null() {
                     bail!("SetParent failed ({})", std::io::Error::last_os_error());
                 }
                 let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                 GetClientRect(host, &mut r);
                 SetWindowPos(win, std::ptr::null_mut(), 0, 0, r.right, r.bottom, SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                fit(win, r.right, r.bottom);
             }
             Ok(())
         }
