@@ -141,8 +141,10 @@ fn main() -> anyhow::Result<()> {
             builder.with_x11();
         }));
     }
-    let start = std::rc::Rc::new(std::cell::RefCell::new(Some((store, tools, connect))));
-    let creator = |start: std::rc::Rc<std::cell::RefCell<Option<(store::Store, launch::Tools, Vec<String>)>>>| -> eframe::AppCreator<'static> {
+    // What App::new takes, kept so that a second renderer can still create the app.
+    type Start = std::rc::Rc<std::cell::RefCell<Option<(store::Store, launch::Tools, Vec<String>)>>>;
+    let start: Start = std::rc::Rc::new(std::cell::RefCell::new(Some((store, tools, connect))));
+    let creator = |start: Start| -> eframe::AppCreator<'static> {
         Box::new(move |cc| {
             let (store, tools, connect) = start.borrow_mut().take().expect("the app is created once");
             Ok(Box::new(app::App::new(cc, store, tools, connect)))
