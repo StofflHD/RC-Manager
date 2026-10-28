@@ -846,27 +846,46 @@ impl App {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.label("Assign to");
-                            let combo = egui::ComboBox::from_id_salt("cred_assign").selected_text("a connection …").width(210.0).show_ui(ui, |ui| {
-                                ui.add(egui::TextEdit::singleline(&mut self.cred_assign_filter).hint_text("🔍 Filter …").desired_width(196.0));
-                                let f = self.cred_assign_filter.trim().to_lowercase();
-                                ui.separator();
-                                egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                                    let mut any = false;
-                                    for (id, name) in avail.iter().filter(|(_, n)| f.is_empty() || n.to_lowercase().contains(&f)) {
-                                        any = true;
-                                        if ui.selectable_label(false, name).clicked() {
-                                            assign = Some((*id, cid));
-                                        }
-                                    }
-                                    if !any {
-                                        ui.label(RichText::new("No match").weak());
-                                    }
-                                });
-                            });
-                            // Start each time with an empty filter.
-                            if combo.response.clicked() {
+                            // A hand-rolled combo instead of `egui::ComboBox`: the built-in one closes
+                            // its popup on every click inside it (`CloseOnClick`), so clicking the
+                            // filter field would dismiss it. Here the popup stays open until a click
+                            // lands outside it or an entry is picked (`CloseOnClickOutside`).
+                            let popup_id = ui.make_persistent_id("cred_assign_popup");
+                            let btn = ui.add_sized(
+                                [210.0, ui.spacing().interact_size.y],
+                                egui::Button::new("a connection …  ⏷"),
+                            );
+                            if btn.clicked() {
+                                ui.memory_mut(|m| m.toggle_popup(popup_id));
+                                // Start each time with an empty filter.
                                 self.cred_assign_filter.clear();
                             }
+                            egui::popup::popup_above_or_below_widget(
+                                ui,
+                                popup_id,
+                                &btn,
+                                egui::AboveOrBelow::Below,
+                                egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+                                |ui| {
+                                    ui.set_min_width(210.0);
+                                    ui.add(egui::TextEdit::singleline(&mut self.cred_assign_filter).hint_text("🔍 Filter …").desired_width(200.0));
+                                    let f = self.cred_assign_filter.trim().to_lowercase();
+                                    ui.separator();
+                                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                                        let mut any = false;
+                                        for (id, name) in avail.iter().filter(|(_, n)| f.is_empty() || n.to_lowercase().contains(&f)) {
+                                            any = true;
+                                            if ui.selectable_label(false, name).clicked() {
+                                                assign = Some((*id, cid));
+                                                ui.memory_mut(|m| m.close_popup());
+                                            }
+                                        }
+                                        if !any {
+                                            ui.label(RichText::new("No match").weak());
+                                        }
+                                    });
+                                },
+                            );
                         });
                     }
                     self.cred_edit = Some(c);
