@@ -141,6 +141,23 @@ fn main() -> anyhow::Result<()> {
             builder.with_x11();
         }));
     }
-    eframe::run_native("RC Manager", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, store, tools, connect)))))
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    let start = std::rc::Rc::new(std::cell::RefCell::new(Some((store, tools, connect))));
+    let creator = |start: std::rc::Rc<std::cell::RefCell<Option<(store::Store, launch::Tools, Vec<String>)>>>| -> eframe::AppCreator<'static> {
+        Box::new(move |cc| {
+            let (store, tools, connect) = start.borrow_mut().take().expect("the app is created once");
+            Ok(Box::new(app::App::new(cc, store, tools, connect)))
+        })
+    };
+    // Windows without OpenGL 2 (virtual machines, servers, some remote sessions): Direct3D via
+    // wgpu instead – eframe keeps its event loop, so the second attempt can open a window again.
+    #[cfg(windows)]
+    let fallback = options.clone();
+    let result = eframe::run_native("RC Manager", options, creator(start.clone()));
+    #[cfg(windows)]
+    if result.is_err() && start.borrow().is_some() {
+        eprintln!("OpenGL failed ({}), trying Direct3D", result.as_ref().err().map(|e| e.to_string()).unwrap_or_default());
+        let options = eframe::NativeOptions { renderer: eframe::Renderer::Wgpu, ..fallback };
+        return eframe::run_native("RC Manager", options, creator(start)).map_err(|e| anyhow::anyhow!("{e}"));
+    }
+    result.map_err(|e| anyhow::anyhow!("{e}"))
 }
