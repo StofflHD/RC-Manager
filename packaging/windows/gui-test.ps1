@@ -30,14 +30,11 @@ public static class U {
   // Style and parent of every window of a class (top-level and children), for the test log.
   public static string Describe(string cls) {
     var o = new System.Text.StringBuilder();
-    EnumProc each = null;
-    each = (h, l) => {
-      if (Cls(h) == cls) o.AppendFormat("{0} {1:X}: parent {2:X} root {3:X} style {4:X8} ex {5:X8}
-", cls, (long)h, (long)GetParent(h),
-          (long)GetAncestor(h, 2), (long)GetWindowLongPtr(h, -16), (long)GetWindowLongPtr(h, -20));
-      EnumChildWindows(h, (c, l2) => { if (Cls(c) == cls) o.AppendFormat("{0} {1:X} (child): parent {2:X} style {3:X8} ex {4:X8}
-", cls, (long)c,
-          (long)GetParent(c), (long)GetWindowLongPtr(c, -16), (long)GetWindowLongPtr(c, -20)); return true; }, IntPtr.Zero);
+    EnumProc each = (h, l) => {
+      if (Cls(h) == cls) o.AppendLine(String.Format("{0} {1:X}: parent {2:X} root {3:X} style {4:X8} ex {5:X8}", cls, (long)h,
+          (long)GetParent(h), (long)GetAncestor(h, 2), (long)GetWindowLongPtr(h, -16), (long)GetWindowLongPtr(h, -20)));
+      EnumChildWindows(h, (c, l2) => { if (Cls(c) == cls) o.AppendLine(String.Format("{0} {1:X} (child): parent {2:X} style {3:X8} ex {4:X8}",
+          cls, (long)c, (long)GetParent(c), (long)GetWindowLongPtr(c, -16), (long)GetWindowLongPtr(c, -20))); return true; }, IntPtr.Zero);
       return true;
     };
     EnumWindows(each, IntPtr.Zero);
