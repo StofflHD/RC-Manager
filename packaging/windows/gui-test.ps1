@@ -65,7 +65,13 @@ $env:RC_MANAGER_NO_UPDATE = '1'
 
 # 1: RDP – the certificate dialog of RC Manager (asked on wfreerdp's console), then the tab.
 $p = Start-App @('--data-dir', $data, '--connect', 'DC01') 'app-rdp'
-Start-Sleep -Seconds 12
+Start-Sleep -Seconds 8
+# DC01 has no credentials: RC Manager's logon dialog (centred; positions for 1150x760 at 0,0).
+Shot '1a-rdp-logon-dialog'
+[U]::Click(600, 362); Start-Sleep -Milliseconds 300
+[System.Windows.Forms.SendKeys]::SendWait('rc-gui-test'); Start-Sleep -Milliseconds 300
+[U]::Click(432, 453)
+Start-Sleep -Seconds 10
 Shot '1-rdp-certificate-dialog'
 Get-Process | Where-Object { $_.ProcessName -match 'wfreerdp|putty|vncviewer|rc-manager' } | Select-Object Id, ProcessName, MainWindowTitle |
     Out-File -Append (Join-Path $Out 'info.txt')

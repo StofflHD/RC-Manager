@@ -286,6 +286,20 @@ mod imp {
         String::from_utf16_lossy(&buf[..n.max(0) as usize])
     }
 
+    /// Makes a window a borderless child window; true if its styles had to be changed.
+    unsafe fn strip_frame(win: HWND) -> bool {
+        let old = GetWindowLongPtrW(win, GWL_STYLE) as u32;
+        let style = (old & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_CHILD;
+        let old_ex = GetWindowLongPtrW(win, GWL_EXSTYLE) as u32;
+        let ex = old_ex & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME);
+        if style == old && ex == old_ex {
+            return false;
+        }
+        SetWindowLongPtrW(win, GWL_STYLE, style as isize);
+        SetWindowLongPtrW(win, GWL_EXSTYLE, ex as isize);
+        true
+    }
+
     impl Embedder {
         pub fn connect(main: WinId) -> Result<Self> {
             let main = hwnd(main);
@@ -352,7 +366,10 @@ mod imp {
             unsafe {
                 SetWindowPos(host, HWND_TOP, x, y, w, h, SWP_NOACTIVATE);
                 for c in children(host) {
-                    SetWindowPos(c, std::ptr::null_mut(), 0, 0, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
+                    // Some clients (PuTTY) restore their frame after being adopted.
+                    let frame = strip_frame(c);
+                    let flags = if frame { SWP_FRAMECHANGED } else { 0 };
+                    SetWindowPos(c, std::ptr::null_mut(), 0, 0, w, h, SWP_NOACTIVATE | SWP_NOZORDER | flags);
                 }
                 if holes.is_empty() {
                     SetWindowRgn(host, std::ptr::null_mut(), 1);
@@ -406,11 +423,7 @@ mod imp {
         pub fn adopt(&self, win: WinId, host: WinId) -> Result<()> {
             let (win, host) = (hwnd(win), hwnd(host));
             unsafe {
-                let style = GetWindowLongPtrW(win, GWL_STYLE) as u32;
-                let style = (style & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_CHILD;
-                SetWindowLongPtrW(win, GWL_STYLE, style as isize);
-                let ex = GetWindowLongPtrW(win, GWL_EXSTYLE) as u32;
-                SetWindowLongPtrW(win, GWL_EXSTYLE, (ex & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME)) as isize);
+                strip_frame(win);
                 if SetParent(win, host).is_null() {
                     bail!("SetParent failed ({})", std::io::Error::last_os_error());
                 }
