@@ -294,7 +294,8 @@ jobs:
           cp "$FREERDP_WIN_PREFIX/licenses/"* "$C/licenses/"
           curl -fsSL -o "$C/putty.exe" "https://the.earth.li/~sgtatham/putty/${PUTTY_VERSION}/w64/putty.exe"
           echo "${PUTTY_SHA256} *$C/putty.exe" | sha256sum -c
-          curl -fsSL -o "$C/licenses/PuTTY-LICENCE.txt" "https://git.tartarus.org/?p=simon/putty.git;a=blob_plain;f=LICENCE;hb=refs/tags/${PUTTY_VERSION}"
+          # PuTTY's licence (MIT) from putty-src.zip of this version; its git server blocks CI.
+          cp packaging/windows/licenses/PuTTY-LICENCE.txt "$C/licenses/"
           curl -fsSL -o "$C/vncviewer.exe" "https://sourceforge.net/projects/tigervnc/files/stable/${TIGERVNC_VERSION}/vncviewer64-${TIGERVNC_VERSION}.exe/download"
           echo "${TIGERVNC_SHA256} *$C/vncviewer.exe" | sha256sum -c
           curl -fsSL -o "$C/licenses/TigerVNC-LICENCE.txt" "https://raw.githubusercontent.com/TigerVNC/tigervnc/v${TIGERVNC_VERSION}/LICENCE.TXT"
@@ -328,6 +329,19 @@ jobs:
           "$D/rc-manager.exe" --data-dir "$DATA" --import tests/fixtures/legacy.db3
           "$D/rc-manager.exe" --data-dir "$DATA" --list | tee list.txt
           grep -q "DC01" list.txt
+
+      # Sessions in tabs on a real Windows desktop: RDP against the runner itself, SSH via PuTTY.
+      - name: GUI test (Windows runner)
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          ./packaging/windows/gui-test.ps1 -App "dist/RC-Manager-$v-windows-x64" -Out gui-win
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-test-windows
+          path: gui-win/
 
       - uses: actions/upload-artifact@v4
         with:

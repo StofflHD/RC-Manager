@@ -99,7 +99,9 @@ pub fn newest(json: &str, include_pre: bool) -> Result<Option<Release>, String> 
 }
 
 fn which(cmd: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
+    // Windows 10/11 ship curl.exe.
+    let names = [cmd.to_string(), format!("{cmd}.exe")];
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| names.iter().any(|n| d.join(n).is_file())))
 }
 
 /// Downloads `url` to `out` (or stdout when `None`) and returns stdout.
