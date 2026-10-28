@@ -646,18 +646,23 @@ impl App {
         match conn.credential {
             CredentialRef::None => None,
             CredentialRef::Id(id) => self.credential(id).cloned(),
-            CredentialRef::Inherit => {
-                let mut cur = conn.parent;
-                for _ in 0..256 {
-                    let f = self.folder(cur?)?;
-                    if let Some(c) = f.credential.and_then(|id| self.credential(id)) {
-                        return Some(c.clone());
-                    }
-                    cur = f.parent;
-                }
-                None
+            CredentialRef::Inherit => self.inherited_credential(conn.parent),
+        }
+    }
+
+    /// Resolves the credential a folder chain provides, starting at `folder` and walking up while
+    /// a folder inherits. Used for `CredentialRef::Inherit` on both connections and folders.
+    fn inherited_credential(&self, folder: Option<Uuid>) -> Option<Credential> {
+        let mut cur = folder;
+        for _ in 0..256 {
+            let f = self.folder(cur?)?;
+            match f.credential {
+                CredentialRef::Id(id) => return self.credential(id).cloned(),
+                CredentialRef::Inherit => cur = f.parent,
+                CredentialRef::None => return None,
             }
         }
+        None
     }
 
     fn folder_path(&self, mut id: Option<Uuid>) -> String {

@@ -603,7 +603,7 @@ impl App {
             .collect();
         users.sort_by_key(|(_, n)| n.to_lowercase());
         let mut folders: Vec<(Sel, String)> =
-            self.data.folders.iter().filter(|f| f.credential == Some(id)).map(|f| (Sel::Folder(f.id), format!("🗀 {}", f.name))).collect();
+            self.data.folders.iter().filter(|f| f.credential == CredentialRef::Id(id)).map(|f| (Sel::Folder(f.id), format!("🗀 {}", f.name))).collect();
         folders.sort_by_key(|(_, n)| n.to_lowercase());
         users.extend(folders);
         users
@@ -943,7 +943,7 @@ impl App {
                 }
                 Sel::Folder(id) => {
                     if let Some(mut f) = self.folder(id).cloned() {
-                        f.credential = None;
+                        f.credential = if f.parent.is_some() { CredentialRef::Inherit } else { CredentialRef::None };
                         if self.result(self.store.save_folder(&f)).is_some() {
                             if let Some(x) = self.data.folders.iter_mut().find(|x| x.id == id) {
                                 *x = f;
@@ -994,8 +994,8 @@ impl App {
                             }
                         }
                         for f in &mut self.data.folders {
-                            if f.credential == Some(id) {
-                                f.credential = None;
+                            if f.credential == CredentialRef::Id(id) {
+                                f.credential = CredentialRef::None;
                             }
                         }
                         self.push(Level::Info, format!("Credentials “{name}” deleted."));
@@ -1046,8 +1046,8 @@ impl App {
                                 }
                             }
                             for f in &mut self.data.folders {
-                                if f.credential == Some(*id) {
-                                    f.credential = None;
+                                if f.credential == CredentialRef::Id(*id) {
+                                    f.credential = CredentialRef::None;
                                 }
                             }
                         }

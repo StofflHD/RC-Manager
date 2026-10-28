@@ -264,14 +264,17 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
                 description: get(r, "description").to_string(),
                 sorting: get(r, "sorting").parse().unwrap_or(0),
                 expanded: truthy(r.get("expandet")),
-                credential: pick.and_then(|c| Uuid::parse_str(c).ok()),
+                credential: pick.and_then(|c| Uuid::parse_str(c).ok()).map(CredentialRef::Id).unwrap_or(CredentialRef::None),
             })
         })
         .collect();
     if bad_folders > 0 {
         warnings.push(format!("{bad_folders} folder(s) with an unreadable id were skipped."));
     }
-    let folder_cred_simple: HashMap<String, Option<Uuid>> = out_folders.iter().map(|f| (f.id.to_string(), f.credential)).collect();
+    let folder_cred_simple: HashMap<String, Option<Uuid>> = out_folders
+        .iter()
+        .map(|f| (f.id.to_string(), if let CredentialRef::Id(id) = f.credential { Some(id) } else { None }))
+        .collect();
     let simple_inherited = |start: &str| -> Option<Uuid> {
         let mut cur = start.to_string();
         for _ in 0..256 {
@@ -656,7 +659,7 @@ mod tests {
         let fb = d.folders.iter().find(|f| f.name == "Server").unwrap();
         assert_eq!(fa.parent, None);
         assert!(fa.expanded);
-        assert_eq!(fa.credential, Some(id("cccccccc-0000-0000-0000-000000000001")));
+        assert_eq!(fa.credential, CredentialRef::Id(id("cccccccc-0000-0000-0000-000000000001")));
         assert_eq!(fb.parent, Some(fa.id));
 
         let admin = d.credentials.iter().find(|c| c.username == "administrator").unwrap();
