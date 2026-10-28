@@ -370,6 +370,16 @@ struct MasterDialog {
     error: String,
 }
 
+/// Column the credential list is sorted by.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum CredSort {
+    #[default]
+    Name,
+    User,
+    Domain,
+    Used,
+}
+
 pub struct App {
     s: Settings,
     store: Store,
@@ -438,6 +448,15 @@ pub struct App {
     cred_filter: String,
     cred_show_password: bool,
     cred_confirm_delete: Option<Uuid>,
+    /// Column the credential list is sorted by, and whether descending.
+    cred_sort: CredSort,
+    cred_sort_desc: bool,
+    /// Show only credentials that no connection or folder uses (to find orphans).
+    cred_only_unused: bool,
+    /// Credentials ticked for a bulk delete.
+    cred_checked: HashSet<Uuid>,
+    /// A bulk delete of `cred_checked` is awaiting confirmation.
+    cred_confirm_bulk: bool,
     ask_credentials: Option<AskCredentials>,
     confirm_delete: Option<Sel>,
     import_dialog: Option<ImportDialog>,
@@ -528,6 +547,11 @@ impl App {
             cred_filter: String::new(),
             cred_show_password: false,
             cred_confirm_delete: None,
+            cred_sort: CredSort::default(),
+            cred_sort_desc: false,
+            cred_only_unused: false,
+            cred_checked: HashSet::new(),
+            cred_confirm_bulk: false,
             ask_credentials: None,
             confirm_delete: None,
             import_dialog: None,
