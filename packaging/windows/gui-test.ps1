@@ -18,6 +18,31 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, IntPtr.Zero); mouse_event(4, 0, 0, 0, IntPtr.Zero); }
+  [DllImport("user32.dll")] static extern IntPtr FindWindowEx(IntPtr p, IntPtr after, string cls, string title);
+  [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr h);
+  [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint f);
+  [DllImport("user32.dll")] static extern IntPtr GetWindowLongPtr(IntPtr h, int i);
+  [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr p, EnumProc f, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  static string Cls(IntPtr h) { var s = new System.Text.StringBuilder(256); GetClassName(h, s, 256); return s.ToString(); }
+  // Style and parent of every window of a class (top-level and children), for the test log.
+  public static string Describe(string cls) {
+    var o = new System.Text.StringBuilder();
+    EnumProc each = null;
+    each = (h, l) => {
+      if (Cls(h) == cls) o.AppendFormat("{0} {1:X}: parent {2:X} root {3:X} style {4:X8} ex {5:X8}
+", cls, (long)h, (long)GetParent(h),
+          (long)GetAncestor(h, 2), (long)GetWindowLongPtr(h, -16), (long)GetWindowLongPtr(h, -20));
+      EnumChildWindows(h, (c, l2) => { if (Cls(c) == cls) o.AppendFormat("{0} {1:X} (child): parent {2:X} style {3:X8} ex {4:X8}
+", cls, (long)c,
+          (long)GetParent(c), (long)GetWindowLongPtr(c, -16), (long)GetWindowLongPtr(c, -20)); return true; }, IntPtr.Zero);
+      return true;
+    };
+    EnumWindows(each, IntPtr.Zero);
+    return o.ToString();
+  }
 }
 "@
 
@@ -84,6 +109,8 @@ Start-Sleep -Seconds 2
 $p = Start-App @('--data-dir', $data, '--connect', 'Linux-Box') 'app-ssh'
 Start-Sleep -Seconds 10
 Shot '2-ssh-putty-tab'
+"PuTTY windows:" | Out-File -Append (Join-Path $Out 'info.txt')
+[U]::Describe('PuTTY') | Out-File -Append (Join-Path $Out 'info.txt')
 Get-Process | Where-Object { $_.ProcessName -match 'putty|rc-manager' } | Select-Object Id, ProcessName, MainWindowTitle |
     Out-File -Append (Join-Path $Out 'info.txt')
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
