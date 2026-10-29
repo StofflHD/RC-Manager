@@ -17,6 +17,9 @@ public static class U {
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtrW(IntPtr h, int i);
+  public static long GetStyle(IntPtr h) { return (long)GetWindowLongPtrW(h, -16); }
   public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, IntPtr.Zero); mouse_event(4, 0, 0, 0, IntPtr.Zero); }
   [DllImport("user32.dll")] static extern IntPtr FindWindowEx(IntPtr p, IntPtr after, string cls, string title);
   [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr h);
@@ -110,6 +113,24 @@ Shot '2-ssh-putty-tab'
 [U]::Describe('PuTTY') | Out-File -Append (Join-Path $Out 'info.txt')
 Get-Process | Where-Object { $_.ProcessName -match 'putty|rc-manager' } | Select-Object Id, ProcessName, MainWindowTitle |
     Out-File -Append (Join-Path $Out 'info.txt')
+# Closing RC Manager normally ends the sessions in its tabs (PuTTY must not keep running).
+# PuTTY's error box disables RC Manager's window (its owner), so it is closed first.
+Get-Process putty -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
+    ForEach-Object { [U]::PostMessage($_.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+Start-Sleep -Seconds 2
+"PuTTY processes before closing RC Manager: $(@(Get-Process putty -ErrorAction SilentlyContinue).Count)" | Out-File -Append (Join-Path $Out 'info.txt')
+$p.Refresh()
+$main = $p.MainWindowHandle
+$style = [U]::GetStyle($main)
+$closed = $p.CloseMainWindow()
+"RC Manager window $main style $('{0:X8}' -f $style) (disabled: $(($style -band 0x08000000) -ne 0)), CloseMainWindow: $closed" |
+    Out-File -Append (Join-Path $Out 'info.txt')
+if (-not $closed) { [U]::PostMessage($main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+$p.WaitForExit(15000) | Out-Null
+Shot '3-after-close'
+Start-Sleep -Seconds 2
+$left = @(Get-Process putty -ErrorAction SilentlyContinue)
+"After closing RC Manager: exited=$($p.HasExited), PuTTY processes left: $($left.Count)" | Out-File -Append (Join-Path $Out 'info.txt')
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-Get-Process putty -ErrorAction SilentlyContinue | Stop-Process -Force
+$left | Stop-Process -Force -ErrorAction SilentlyContinue
 exit 0

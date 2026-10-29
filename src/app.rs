@@ -2021,6 +2021,15 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Sessions in tabs end with RC Manager – on Windows their clients (wfreerdp, PuTTY,
+        // TigerVNC) would keep running without a window; sessions in separate windows stay open.
+        let tabbed: Vec<u64> =
+            self.tabs.iter().filter(|t| t.ended.is_none() && self.sessions.contains_key(&t.session)).map(|t| t.session).collect();
+        for session in tabbed {
+            self.stop_session(session);
+        }
+        // The reachability check's `ping -t` would keep running, too.
+        self.reach = None;
         launch::cleanup_secret_files();
         if let Some(exe) = self.restart_exe.take() {
             crate::update::finish_on_exit(&exe, true);
