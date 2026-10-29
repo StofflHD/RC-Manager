@@ -2852,6 +2852,7 @@ dependencies = [
  "shell-words",
  "uuid",
  "wgpu",
+ "windows 0.58.0",
  "windows-sys 0.59.0",
  "winit",
  "winresource",

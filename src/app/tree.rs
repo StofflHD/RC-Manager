@@ -47,6 +47,10 @@ impl App {
                     ui.checkbox(&mut self.s.dark, "Dark Theme");
                     let embed_hint = if self.embedder.is_some() { "Sessions open as tabs inside this window" } else { "Needs X11 or XWayland" };
                     ui.checkbox(&mut self.s.embed_sessions, "Open Sessions in Tabs").on_hover_text(embed_hint);
+                    #[cfg(windows)]
+                    ui.checkbox(&mut self.s.rdp_activex, "Windows RDP Client in Tabs").on_hover_text(
+                        "RDP tabs use the Remote Desktop client built into Windows (as mstsc.exe). Off: FreeRDP (wfreerdp). Applies to new sessions.",
+                    );
                     let mut shown = !self.s.sidebar_collapsed;
                     if ui.checkbox(&mut shown, "Show Sidebar (Ctrl+B)").changed() {
                         self.s.sidebar_collapsed = !shown;

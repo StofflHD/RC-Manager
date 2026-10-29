@@ -902,7 +902,8 @@ pub enum Event {
     Output { session: u64, line: String },
     /// The client waits for an answer on stdin (e.g. FreeRDP's certificate question).
     Prompt { session: u64, text: String },
-    Exited { session: u64, code: Option<i32> },
+    /// The session ended; `reason` explains why when the client says so (ActiveX control).
+    Exited { session: u64, code: Option<i32>, reason: Option<String> },
 }
 
 /// A started client.
@@ -1112,7 +1113,7 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
         for dir in &private_dirs {
             std::fs::remove_dir_all(dir).ok();
         }
-        events.send(Event::Exited { session, code }).ok();
+        events.send(Event::Exited { session, code, reason: None }).ok();
         wake();
     });
     Ok(Spawned { pid, stdin })

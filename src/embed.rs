@@ -410,6 +410,11 @@ mod imp {
         out
     }
 
+    /// The first window of class `class` below `parent` (any depth).
+    fn descendant(parent: HWND, class: &str) -> Option<HWND> {
+        children(parent).into_iter().find_map(|c| if class_name(c) == class { Some(c) } else { descendant(c, class) })
+    }
+
     fn class_name(w: HWND) -> String {
         let mut buf = [0u16; 128];
         let n = unsafe { GetClassNameW(w, buf.as_mut_ptr(), buf.len() as i32) };
@@ -675,7 +680,13 @@ mod imp {
         /// Gives the keyboard to a client window (or back to RC Manager with `None`). Child
         /// windows of other processes share RC Manager's input queue, so SetFocus works.
         pub fn focus(&self, win: Option<WinId>) {
-            let target = win.map(hwnd).unwrap_or(self.main);
+            let mut target = win.map(hwnd).unwrap_or(self.main);
+            // The Remote Desktop ActiveX control (hosted by ATL) takes keys in its input window.
+            if class_name(target).starts_with("AtlAxWin") {
+                if let Some(input) = descendant(target, "IHWindowClass") {
+                    target = input;
+                }
+            }
             unsafe { SetFocus(target) };
         }
 

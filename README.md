@@ -19,7 +19,7 @@ then keeps the active sessions and a counter of new warnings visible.
 |---|---|---|
 | Folder tree, search, sort order | ✔ | ✔ |
 | Sessions as tabs, scaled with the window | ✔ | ✔ (Linux: X11/XWayland) |
-| RDP | embedded MSTSC ActiveX | FreeRDP 3 drawn into the tab; remote resolution follows the tab or the desktop is scaled |
+| RDP | embedded MSTSC ActiveX | Linux: FreeRDP 3 drawn into the tab; Windows: the MSTSC ActiveX control (FreeRDP optional); remote resolution follows the tab or the desktop is scaled |
 | Unlock a locked RDP session | ✔ (send password) | ✔ (*Unlock* types the stored password, no reconnect) |
 | SSH | embedded PuTTY | Linux: `ssh` in an xterm inside the tab, password via `sshpass`; Windows: PuTTY inside the tab |
 | VNC | UltraVNC/TightVNC | TigerVNC `vncviewer`, its window moved into the tab |
@@ -120,13 +120,17 @@ Two packages for Windows 10/11 (x64), both with **FreeRDP 3** (`wfreerdp`), **Pu
   `rc-manager.exe`. The file `rc-manager.portable` keeps all data and settings in the folder
   `data` next to it.
 
-Sessions open as tabs like on Linux: FreeRDP draws into the tab, PuTTY's and TigerVNC's windows
-are moved into it (their title bar and frame lie outside the tab, as in the original). The
-installed version stores its data in `%APPDATA%\rc-manager`. FreeRDP's Windows client is built
-from source with a small patch (`packaging/windows/patch-freerdp.py`): when RC Manager starts
-it, it asks certificate and logon questions on its console instead of in its own message boxes,
-so RC Manager's certificate dialog and trusted-fingerprint store apply as on Linux, and its
-keyboard hook also works while it is embedded. PuTTY takes its font and colours from its own
+Sessions open as tabs like on Linux. RDP tabs use the Remote Desktop client built into Windows –
+the ActiveX control of mstsc.exe, as in the original – hosted in RC Manager's window: it draws
+with the GPU and shows its own certificate and logon dialogs. *Options → Windows RDP Client in
+Tabs* switches to FreeRDP (`wfreerdp`) instead, which is also used for RemoteApp and when the
+control is not available. PuTTY's and TigerVNC's windows are moved into the tab (their title bar
+and frame lie outside the tab, as in the original). The installed version stores its data in
+`%APPDATA%\rc-manager`. FreeRDP's Windows client is built from source with a small patch
+(`packaging/windows/patch-freerdp.py`): when RC Manager starts it, it asks certificate and logon
+questions on its console instead of in its own message boxes, so RC Manager's certificate dialog
+and trusted-fingerprint store apply as on Linux, and its keyboard hook also works while it is
+embedded. PuTTY takes its font and colours from its own
 saved session `RC-Manager` (in the registry, rewritten at every start); PuTTY's default settings
 and your own sessions stay untouched. Without OpenGL 2 (virtual machines, servers, some remote
 sessions) RC Manager draws with Direct3D. The updater replaces the installation (silent setup)
@@ -271,6 +275,7 @@ src/store.rs           SQLite storage
 src/vault.rs           password encryption
 src/launch.rs          starting FreeRDP, ssh/PuTTY, vncviewer, the browser
 src/embed.rs           embedding of sessions into tabs (X11 and Win32), typing for Unlock
+src/rdpax.rs           Windows: RDP with the Remote Desktop ActiveX control (mstsc)
 src/net.rs             Wake-on-LAN, port check
 src/update.rs          updater (GitHub releases, SHA-256 check, replaces the AppImage or the
                        Windows installation)
