@@ -64,6 +64,8 @@ impl App {
             /// The connection it belongs to, if it still exists (for the context menu).
             connection: Option<Uuid>,
             has_mac: bool,
+            /// RDP: `Unlock` is offered; whether a password is stored for it.
+            unlock: Option<bool>,
             /// The session is recorded, so its history can be copied.
             has_log: bool,
             /// The session ended on its own; the connection to reconnect, if it still exists.
@@ -78,7 +80,10 @@ impl App {
                 let has_mac = connection.and_then(|id| self.connection(id)).is_some_and(|c| !c.mac.trim().is_empty());
                 let has_log = session.is_some_and(|s| s.log.is_some());
                 let ended_conn = t.ended.as_ref().map(|e| e.conn.filter(|id| self.connection(*id).is_some()));
-                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac, has_log, ended_conn }
+                let unlock = session.filter(|s| s.conn.protocol == Protocol::Rdp && t.ended.is_none()).map(|s| {
+                    self.connection(s.conn.id).and_then(|c| self.resolve_credential(c)).is_some_and(|k| !k.password.is_empty())
+                });
+                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac, unlock, has_log, ended_conn }
             })
             .collect();
         let mut close = None;
@@ -136,6 +141,16 @@ impl App {
                             if ui.button("⟳ Reconnect").clicked() {
                                 actions.push(Action::Reconnect(id));
                                 ui.close_menu();
+                            }
+                            if let Some(password) = t.unlock {
+                                let r = ui
+                                    .add_enabled(password, egui::Button::new("🔓 Unlock"))
+                                    .on_hover_text("Types the stored password and Enter into the session, e.g. on its lock screen.")
+                                    .on_disabled_hover_text("No password is stored for this connection.");
+                                if r.clicked() {
+                                    actions.push(Action::UnlockTab(t.session));
+                                    ui.close_menu();
+                                }
                             }
                             if ui.button("✏ Properties …").clicked() {
                                 actions.push(Action::Edit(Sel::Connection(id)));

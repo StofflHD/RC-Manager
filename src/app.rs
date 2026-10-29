@@ -88,6 +88,8 @@ enum Action {
     /// Type the stored password and Enter into the connection's open RDP tab (unlocks a locked
     /// remote screen without reconnecting).
     Unlock(Uuid),
+    /// `Unlock` for one session tab (by its session id).
+    UnlockTab(u64),
     QuickConnect,
     NewFolder(Option<Uuid>),
     NewConnection(Option<Uuid>, Protocol),
@@ -759,6 +761,20 @@ impl App {
         self.data.credentials.iter().find(|c| c.id == id)
     }
 
+    /// Starts `Action::Unlock` for a connection's session tab (`session`, or its first open one).
+    fn start_unlock(&mut self, id: Uuid, session: Option<u64>) {
+        let Some(conn) = self.connection(id).cloned() else { return };
+        let password = self.resolve_credential(&conn).map(|c| c.password).filter(|p| !p.is_empty());
+        let session = session.filter(|s| self.tabs.iter().any(|t| t.session == *s && t.ended.is_none())).or_else(|| self.unlock_tab(id));
+        match (session, password) {
+            (Some(session), Some(password)) => {
+                self.active_tab = Some(session);
+                self.unlock = Some(Unlock { session, password, started: Instant::now(), focused: None });
+            }
+            _ => self.push(Level::Warn, format!("{}: unlocking needs an open session tab and a stored password.", conn.name)),
+        }
+    }
+
     /// The open (embedded, running) session tab of a connection.
     fn unlock_tab(&self, conn: Uuid) -> Option<u64> {
         self.tabs
@@ -970,16 +986,10 @@ impl App {
                 }
             }
             Action::AskDelete(s) => self.confirm_delete = Some(s),
-            Action::Unlock(id) => {
-                if let Some(conn) = self.connection(id).cloned() {
-                    let password = self.resolve_credential(&conn).map(|c| c.password).filter(|p| !p.is_empty());
-                    match (self.unlock_tab(id), password) {
-                        (Some(session), Some(password)) => {
-                            self.active_tab = Some(session);
-                            self.unlock = Some(Unlock { session, password, started: Instant::now(), focused: None });
-                        }
-                        _ => self.push(Level::Warn, format!("{}: unlocking needs an open session tab and a stored password.", conn.name)),
-                    }
+            Action::Unlock(id) => self.start_unlock(id, None),
+            Action::UnlockTab(session) => {
+                if let Some(id) = self.sessions.get(&session).map(|s| s.conn.id) {
+                    self.start_unlock(id, Some(session));
                 }
             }
             Action::Wake(id) => {
