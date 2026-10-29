@@ -56,7 +56,7 @@ wgpu = { version = "22.1", default-features = false, features = ["dx12"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Console", "Win32_System_Threading", "Win32_System_Registry", "Win32_Security"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { version = "0.13", features = ["res", "shape"] }
+x11rb = { version = "0.13", features = ["res", "shape", "xtest"] }
 # For EventLoopBuilderExtX11: RC Manager runs on X11/XWayland so that sessions can be embedded.
 winit = { version = "0.30", default-features = false, features = ["x11", "wayland"] }
 

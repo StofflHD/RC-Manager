@@ -85,6 +85,11 @@ enum Action {
     Connect(Uuid),
     /// Close the connection's existing session(s), then connect again (in-place reconnect).
     Reconnect(Uuid),
+    /// Type the stored password and Enter into the connection's open RDP tab (unlocks a locked
+    /// remote screen without reconnecting).
+    Unlock(Uuid),
+    /// `Unlock` for one session tab (by its session id).
+    UnlockTab(u64),
     QuickConnect,
     NewFolder(Option<Uuid>),
     NewConnection(Option<Uuid>, Protocol),
@@ -301,6 +306,15 @@ impl Drop for Reachability {
 /// Geometry last given to a host window: (x, y, width, height, visible) and the cut-out holes.
 type Placement = ((i32, i32, u32, u32, bool), Vec<[i32; 4]>);
 
+/// An unlock in progress (see `Action::Unlock`): the session first gets the keyboard focus.
+struct Unlock {
+    session: u64,
+    password: String,
+    started: Instant,
+    /// When the session was given the focus.
+    focused: Option<Instant>,
+}
+
 /// A session shown as a tab; its client draws into the window `host` (X11 or Win32).
 struct SessionTab {
     session: u64,
@@ -438,6 +452,9 @@ pub struct App {
     session_focus: Option<u64>,
     /// Last time the focus was handed back to a session (see `has_focus`).
     focus_checked: Instant,
+    unlock: Option<Unlock>,
+    /// Session name and result of the password being typed by `Unlock`.
+    typing: Option<(String, crate::embed::Typed)>,
     /// Connections to open at start (`--connect`).
     pending_connect: Vec<String>,
     /// Sessions that were open at the last exit, offered for reopening once unlocked.
@@ -457,6 +474,8 @@ pub struct App {
     cred_selected: Option<Uuid>,
     /// Working copy of the selected (or new) credentials in the credential manager.
     cred_edit: Option<Credential>,
+    /// Credentials being created in a connection's properties (for that connection's id).
+    new_cred: Option<(Uuid, Credential)>,
     /// `cred_edit` is a new set that is not stored yet.
     cred_new: bool,
     cred_filter: String,
@@ -630,6 +649,8 @@ impl App {
             session_rect: None,
             session_focus: None,
             focus_checked: Instant::now(),
+            unlock: None,
+            typing: None,
             pending_connect: connect,
             reopen_offer,
             reopen_sel: None,
@@ -643,6 +664,7 @@ impl App {
             show_credentials: false,
             cred_selected: None,
             cred_edit: None,
+            new_cred: None,
             cred_new: false,
             cred_filter: String::new(),
             cred_assign_filter: String::new(),
@@ -740,6 +762,28 @@ impl App {
 
     fn credential(&self, id: Uuid) -> Option<&Credential> {
         self.data.credentials.iter().find(|c| c.id == id)
+    }
+
+    /// Starts `Action::Unlock` for a connection's session tab (`session`, or its first open one).
+    fn start_unlock(&mut self, id: Uuid, session: Option<u64>) {
+        let Some(conn) = self.connection(id).cloned() else { return };
+        let password = self.resolve_credential(&conn).map(|c| c.password).filter(|p| !p.is_empty());
+        let session = session.filter(|s| self.tabs.iter().any(|t| t.session == *s && t.ended.is_none())).or_else(|| self.unlock_tab(id));
+        match (session, password) {
+            (Some(session), Some(password)) => {
+                self.active_tab = Some(session);
+                self.unlock = Some(Unlock { session, password, started: Instant::now(), focused: None });
+            }
+            _ => self.push(Level::Warn, format!("{}: unlocking needs an open session tab and a stored password.", conn.name)),
+        }
+    }
+
+    /// The open (embedded, running) session tab of a connection.
+    fn unlock_tab(&self, conn: Uuid) -> Option<u64> {
+        self.tabs
+            .iter()
+            .find(|t| t.ended.is_none() && self.sessions.get(&t.session).is_some_and(|s| s.conn.id == conn))
+            .map(|t| t.session)
     }
 
     /// Resolves credentials; `Inherit` walks up the folder tree.
@@ -945,6 +989,12 @@ impl App {
                 }
             }
             Action::AskDelete(s) => self.confirm_delete = Some(s),
+            Action::Unlock(id) => self.start_unlock(id, None),
+            Action::UnlockTab(session) => {
+                if let Some(id) = self.sessions.get(&session).map(|s| s.conn.id) {
+                    self.start_unlock(id, Some(session));
+                }
+            }
             Action::Wake(id) => {
                 if let Some(c) = self.connection(id).cloned() {
                     match net::wake_on_lan(&c.mac) {
@@ -1569,14 +1619,17 @@ impl App {
         // Menus, dialogs and the sidebar overlay over the session: cut out of the session window
         // (their shadows stay hidden), or hide it without SHAPE. Tooltips are excluded: they fade
         // in and follow the hovered entry, so cutting a hole for them made the session flicker
-        // (e.g. hovering a host in the collapsed-sidebar overlay) for little benefit.
+        // (e.g. hovering a host in the collapsed-sidebar overlay) for little benefit. Within an
+        // open menu they are cut out, though, so the hint of a menu entry is not cropped.
+        let menu_open = ctx.is_context_menu_open() || ctx.memory(|m| m.any_popup_open());
         let covers: Vec<egui::Rect> = rect
             .map(|r| {
                 ctx.memory(|m| {
                     m.areas()
                         .visible_layer_ids()
                         .into_iter()
-                        .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::PanelResizeLine | egui::Order::Tooltip))
+                        .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::PanelResizeLine))
+                        .filter(|l| l.order != egui::Order::Tooltip || menu_open)
                         .filter_map(|l| m.area_rect(l.id))
                         .map(|a| a.expand(1.0))
                         .filter(|a| a.intersects(r))
@@ -1719,6 +1772,54 @@ impl App {
                 self.session_focus = None;
             }
             None => {}
+        }
+        // Unlock: show the tab, give the session the keyboard, then type the password into it.
+        let mut unlock_done = false;
+        if let Some(u) = &mut self.unlock {
+            match self.tabs.iter().find(|t| t.session == u.session && t.ended.is_none()) {
+                None => unlock_done = true,
+                Some(tab) => {
+                    let client = emb.client_of(tab.host);
+                    let shown = Some(tab.session) == self.active_tab && tab.placed.as_ref().is_some_and(|((.., visible), _)| *visible);
+                    match (client.filter(|_| shown), u.focused) {
+                        _ if u.started.elapsed() > Duration::from_secs(5) => {
+                            logs.push((Level::Warn, format!("{}: the session did not get the keyboard, nothing was typed.", tab.name)));
+                            unlock_done = true;
+                        }
+                        (Some(client), None) => {
+                            emb.focus(Some(client));
+                            self.session_focus = Some(tab.session);
+                            u.focused = Some(Instant::now());
+                        }
+                        (Some(client), Some(t)) if t.elapsed() > Duration::from_millis(400) => {
+                            match emb.type_text(client, std::mem::take(&mut u.password)) {
+                                Ok(rx) => {
+                                    logs.push((Level::Info, format!("{}: typing the password to unlock the session …", tab.name)));
+                                    self.typing = Some((tab.name.clone(), rx));
+                                }
+                                Err(e) => logs.push((Level::Warn, format!("{}: cannot type the password: {e:#}", tab.name))),
+                            }
+                            unlock_done = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if unlock_done {
+            self.unlock = None;
+        }
+        let typed = self.typing.as_ref().and_then(|(name, rx)| match rx.try_recv() {
+            Ok(r) => Some((name.clone(), r)),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((name.clone(), Err("typing stopped".into()))),
+        });
+        if let Some((name, r)) = typed {
+            self.typing = None;
+            logs.push(match r {
+                Ok(()) => (Level::Info, format!("{name}: password typed.")),
+                Err(e) => (Level::Warn, format!("{name}: unlocking failed: {e}")),
+            });
         }
         for (lvl, msg) in logs {
             self.push(lvl, msg);

@@ -64,6 +64,8 @@ impl App {
             /// The connection it belongs to, if it still exists (for the context menu).
             connection: Option<Uuid>,
             has_mac: bool,
+            /// RDP: `Unlock` is offered; whether a password is stored for it.
+            unlock: Option<bool>,
             /// The session is recorded, so its history can be copied.
             has_log: bool,
             /// The session ended on its own; the connection to reconnect, if it still exists.
@@ -78,7 +80,10 @@ impl App {
                 let has_mac = connection.and_then(|id| self.connection(id)).is_some_and(|c| !c.mac.trim().is_empty());
                 let has_log = session.is_some_and(|s| s.log.is_some());
                 let ended_conn = t.ended.as_ref().map(|e| e.conn.filter(|id| self.connection(*id).is_some()));
-                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac, has_log, ended_conn }
+                let unlock = session.filter(|s| s.conn.protocol == Protocol::Rdp && t.ended.is_none()).map(|s| {
+                    self.connection(s.conn.id).and_then(|c| self.resolve_credential(c)).is_some_and(|k| !k.password.is_empty())
+                });
+                TabInfo { session: t.session, icon: t.icon, name: t.name.clone(), connection, has_mac, unlock, has_log, ended_conn }
             })
             .collect();
         let mut close = None;
@@ -136,6 +141,16 @@ impl App {
                             if ui.button("⟳ Reconnect").clicked() {
                                 actions.push(Action::Reconnect(id));
                                 ui.close_menu();
+                            }
+                            if let Some(password) = t.unlock {
+                                let r = ui
+                                    .add_enabled(password, egui::Button::new("🔓 Unlock"))
+                                    .on_hover_text("Types the stored password and Enter into the session, e.g. on its lock screen.")
+                                    .on_disabled_hover_text("No password is stored for this connection.");
+                                if r.clicked() {
+                                    actions.push(Action::UnlockTab(t.session));
+                                    ui.close_menu();
+                                }
                             }
                             if ui.button("✏ Properties …").clicked() {
                                 actions.push(Action::Edit(Sel::Connection(id)));
@@ -246,6 +261,8 @@ impl App {
                 ui.centered_and_justified(|ui| ui.label(RichText::new("Select a connection or folder.\nDouble-click connects.").weak()));
                 return;
             };
+            let mut create_cred: Option<Credential> = None;
+            let mut cancel_cred = false;
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 match &mut editor {
                     Editor::Folder(f) => {
@@ -317,8 +334,45 @@ impl App {
                             Self::folder_combo(ui, "conn_parent", &mut c.parent, &choices);
                             ui.end_row();
                             ui.label("Credentials");
-                            Self::credential_combo(ui, "conn_cred", &mut c.credential, &self.data.credentials, true, inherited.as_ref());
+                            ui.horizontal(|ui| {
+                                Self::credential_combo(ui, "conn_cred", &mut c.credential, &self.data.credentials, true, inherited.as_ref());
+                                let open = self.new_cred.as_ref().is_some_and(|(id, _)| *id == c.id);
+                                if ui.add_enabled(!open, egui::Button::new("+ New …")).on_hover_text("Create new credentials for this connection").clicked() {
+                                    self.new_cred = Some((c.id, Credential::new(&c.name)));
+                                }
+                            });
                             ui.end_row();
+                            // New credentials, stored and assigned to this connection on "Create".
+                            if let Some((_, nc)) = self.new_cred.as_mut().filter(|(id, _)| *id == c.id) {
+                                ui.label("");
+                                ui.vertical(|ui| ui.group(|ui| {
+                                    egui::Grid::new("new_cred_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                                        ui.label("Name");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.name).desired_width(220.0));
+                                        ui.end_row();
+                                        ui.label("User");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.username).desired_width(220.0));
+                                        ui.end_row();
+                                        ui.label("Domain");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.domain).hint_text("optional").desired_width(220.0));
+                                        ui.end_row();
+                                        ui.label("Password");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.password).password(true).desired_width(220.0));
+                                        ui.end_row();
+                                    });
+                                    ui.horizontal(|ui| {
+                                        let ok = !nc.name.trim().is_empty();
+                                        if ui.add_enabled(ok, egui::Button::new("Create")).on_disabled_hover_text("A name is needed.").clicked() {
+                                            create_cred = Some(nc.clone());
+                                            c.credential = CredentialRef::Id(nc.id);
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            cancel_cred = true;
+                                        }
+                                    });
+                                }));
+                                ui.end_row();
+                            }
                             ui.label("MAC (Wake-on-LAN)");
                             ui.add(egui::TextEdit::singleline(&mut c.mac).hint_text("00:11:22:33:44:55").desired_width(320.0));
                             ui.end_row();
@@ -332,6 +386,17 @@ impl App {
                 }
             });
             self.editor = Some(editor);
+            if cancel_cred {
+                self.new_cred = None;
+            }
+            if let Some(mut cred) = create_cred {
+                cred.name = cred.name.trim().to_string();
+                if self.result(self.store.save_credential(&cred)).is_some() {
+                    self.push(Level::Info, format!("Credentials “{}” created.", cred.name));
+                    self.data.credentials.push(cred);
+                    self.new_cred = None;
+                }
+            }
         }
     }
 
