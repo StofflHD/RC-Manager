@@ -17,6 +17,7 @@ public static class U {
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, IntPtr.Zero); mouse_event(4, 0, 0, 0, IntPtr.Zero); }
   [DllImport("user32.dll")] static extern IntPtr FindWindowEx(IntPtr p, IntPtr after, string cls, string title);
   [DllImport("user32.dll")] static extern IntPtr GetParent(IntPtr h);
@@ -111,6 +112,11 @@ Shot '2-ssh-putty-tab'
 Get-Process | Where-Object { $_.ProcessName -match 'putty|rc-manager' } | Select-Object Id, ProcessName, MainWindowTitle |
     Out-File -Append (Join-Path $Out 'info.txt')
 # Closing RC Manager normally ends the sessions in its tabs (PuTTY must not keep running).
+# PuTTY's error box disables RC Manager's window (its owner), so it is closed first.
+Get-Process putty -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne [IntPtr]::Zero } |
+    ForEach-Object { [U]::PostMessage($_.MainWindowHandle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+Start-Sleep -Seconds 2
+"PuTTY processes before closing RC Manager: $(@(Get-Process putty -ErrorAction SilentlyContinue).Count)" | Out-File -Append (Join-Path $Out 'info.txt')
 $p.CloseMainWindow() | Out-Null
 $p.WaitForExit(15000) | Out-Null
 Start-Sleep -Seconds 2
