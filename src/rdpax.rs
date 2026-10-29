@@ -39,6 +39,7 @@ mod imp {
     use crate::model::{Connection, Credential};
     use anyhow::{anyhow, bail, Context, Result};
     use std::cell::Cell;
+    use std::time::{Duration, Instant};
     use windows::core::{Interface, IUnknown, BSTR, GUID, HSTRING, PCWSTR, VARIANT};
     use windows::Win32::System::Com::{CLSIDFromProgID, StringFromGUID2, IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS};
     use windows::Win32::System::Ole::{OleInitialize, DISPID_PROPERTYPUT};
@@ -125,7 +126,10 @@ mod imp {
         dynamic: Cell<bool>,
         /// Last connection state (0 = not connected, 1 = connected, 2 = connecting).
         state: Cell<i32>,
+        /// The size the session has, the size the tab wants, and when it was last asked for.
         size: Cell<(u32, u32)>,
+        want: Cell<(u32, u32)>,
+        tried: Cell<Instant>,
     }
 
     impl RdpAx {
@@ -148,6 +152,7 @@ mod imp {
                 let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
                 GetClientRect(host, &mut r);
                 let (w, h) = (r.right.max(width as i32), r.bottom.max(height as i32));
+                let size = super::desktop_size(w as u32, h as u32);
                 let mut last = anyhow!("the Remote Desktop ActiveX control is not installed");
                 for progid in PROGIDS {
                     // ATL takes text that is no registered class for a web address and would
@@ -181,7 +186,15 @@ mod imp {
                     }
                     let unknown = IUnknown::from_raw(raw);
                     let ax = match unknown.cast::<IDispatch>().map_err(anyhow::Error::from).and_then(|d| Disp(d.clone()).id("Server").map(|_| d)) {
-                        Ok(d) => RdpAx { window, client: Disp(d), dynamic: Cell::new(false), state: Cell::new(2), size: Cell::new((w as u32, h as u32)) },
+                        Ok(d) => RdpAx {
+                            window,
+                            client: Disp(d),
+                            dynamic: Cell::new(false),
+                            state: Cell::new(2),
+                            size: Cell::new(size),
+                            want: Cell::new(size),
+                            tried: Cell::new(Instant::now()),
+                        },
                         Err(e) => {
                             DestroyWindow(window);
                             last = anyhow!("{progid}: {e}");
@@ -189,7 +202,7 @@ mod imp {
                         }
                     };
                     // On an error, dropping `ax` closes the control's window again.
-                    ax.dynamic.set(ax.setup(conn, cred, w as u32, h as u32)?);
+                    ax.dynamic.set(ax.setup(conn, cred, size.0, size.1)?);
                     ax.client.call("Connect", Vec::new())?;
                     return Ok(ax);
                 }
@@ -214,8 +227,9 @@ mod imp {
             let fixed = o.resolution.split_once(['x', 'X']).and_then(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)));
             let dynamic = o.dynamic_resolution || fixed.is_none();
             let (w, h) = if o.dynamic_resolution { (width, height) } else { fixed.unwrap_or((width, height)) };
-            c.put("DesktopWidth", w.clamp(200, 8192) as i32)?;
-            c.put("DesktopHeight", h.clamp(200, 8192) as i32)?;
+            let (w, h) = super::desktop_size(w, h);
+            c.put("DesktopWidth", w as i32)?;
+            c.put("DesktopHeight", h as i32)?;
             if o.color_depth > 0 {
                 c.put("ColorDepth", o.color_depth as i32)?;
             }
@@ -260,6 +274,14 @@ mod imp {
         pub fn poll(&self) -> Option<String> {
             let state = self.client.get("Connected").ok().and_then(|v| i16::try_from(&v).ok()).map(i32::from).unwrap_or(0);
             let before = self.state.replace(state);
+            if state == 1 {
+                // After a (re)connection the session has the size it was opened with; a tab
+                // size that could not be applied yet is retried until the session accepts it.
+                if before != 1 {
+                    self.size.set((0, 0));
+                }
+                self.apply();
+            }
             if state != 0 || before == 0 {
                 return None;
             }
@@ -269,13 +291,28 @@ mod imp {
 
         /// The tab has a new size: the remote desktop follows it (dynamic resolution).
         pub fn resize(&self, width: u32, height: u32) {
-            if !self.dynamic.get() || self.state.get() != 1 || self.size.get() == (width, height) || width < 200 || height < 200 {
+            if !self.dynamic.get() || width < 200 || height < 200 {
                 return;
             }
-            self.size.set((width, height));
-            let (w, h) = (width.min(8192), height.min(8192));
-            let args = vec![VARIANT::from(w), VARIANT::from(h), VARIANT::from(w), VARIANT::from(h), VARIANT::from(0u32), VARIANT::from(100u32), VARIANT::from(100u32)];
-            self.client.call("UpdateSessionDisplaySettings", args).ok();
+            self.want.set(super::desktop_size(width, height));
+            self.tried.set(Instant::now() - Duration::from_secs(1));
+            self.apply();
+        }
+
+        /// Asks the session for the wanted size. The control refuses it until the display
+        /// channel is up (shortly after logon), so a refused size is retried every second.
+        fn apply(&self) {
+            let (w, h) = self.want.get();
+            if !self.dynamic.get() || self.state.get() != 1 || self.size.get() == (w, h) || self.tried.get().elapsed() < Duration::from_secs(1) {
+                return;
+            }
+            self.tried.set(Instant::now());
+            // Physical size in millimetres, for 96 dpi.
+            let (pw, ph) = (w * 254 / 960, h * 254 / 960);
+            let args = vec![VARIANT::from(w), VARIANT::from(h), VARIANT::from(pw), VARIANT::from(ph), VARIANT::from(0u32), VARIANT::from(100u32), VARIANT::from(100u32)];
+            if self.client.call("UpdateSessionDisplaySettings", args).is_ok() {
+                self.size.set((w, h));
+            }
         }
 
         /// Ends the session (RC Manager closes the tab or exits).
@@ -317,6 +354,12 @@ impl RdpAx {
     pub fn disconnect(&self) {}
 }
 
+/// A desktop size RDP accepts: 200 to 8192 pixels, the width even (MS-RDPEDISP).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn desktop_size(width: u32, height: u32) -> (u32, u32) {
+    (width.clamp(200, 8192) & !1, height.clamp(200, 8192))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -324,5 +367,12 @@ mod tests {
         assert_eq!(super::extended_reason(12), "the user logged off");
         assert_eq!(super::extended_reason(260), "the server could not issue a Remote Desktop licence");
         assert_eq!(super::extended_reason(9999), "disconnected (reason 9999)");
+    }
+
+    #[test]
+    fn desktop_sizes() {
+        assert_eq!(super::desktop_size(1281, 721), (1280, 721));
+        assert_eq!(super::desktop_size(100, 9000), (200, 8192));
+        assert_eq!(super::desktop_size(8193, 600), (8192, 600));
     }
 }
