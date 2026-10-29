@@ -7,35 +7,50 @@ like FreeRDP's X11 client on Linux, and keeps trusted certificates itself. With 
 variable RC_MANAGER_PROMPTS set (only RC Manager sets it), wfreerdp therefore uses the console
 questions of the common client code. Without it, wfreerdp behaves as usual.
 
+Embedded (/parent-window), wfreerdp's keyboard hook only forwards keys while the parent window
+has the focus, but mouse and keyboard input stay suspended until its own window gets the focus –
+so no window could receive both. The hook therefore also accepts its own window.
+
 Usage: patch-freerdp.py <FreeRDP source directory>
 """
 import pathlib
 import sys
 
-src = pathlib.Path(sys.argv[1]) / "client" / "Windows" / "wf_client.c"
-text = src.read_text(encoding="utf-8")
+client = pathlib.Path(sys.argv[1]) / "client" / "Windows"
 
-PATCHES = [
-    (
-        "static BOOL wf_has_console(void)\n{\n",
-        "static BOOL wf_has_console(void)\n{\n"
-        "\t/* RC Manager: questions on stdin/stdout instead of message boxes */\n"
-        "\tif (getenv(\"RC_MANAGER_PROMPTS\"))\n"
-        "\t\treturn TRUE;\n",
-    ),
-    (
-        "\tif (freerdp_settings_get_bool(instance->context->settings, FreeRDP_CredentialsFromStdin))\n"
-        "\t\treturn client_cli_authenticate_ex(instance, username, password, domain, reason);\n",
-        "\tif (freerdp_settings_get_bool(instance->context->settings, FreeRDP_CredentialsFromStdin) ||\n"
-        "\t    getenv(\"RC_MANAGER_PROMPTS\"))\n"
-        "\t\treturn client_cli_authenticate_ex(instance, username, password, domain, reason);\n",
-    ),
-]
+PATCHES = {
+    "wf_client.c": [
+        (
+            "static BOOL wf_has_console(void)\n{\n",
+            "static BOOL wf_has_console(void)\n{\n"
+            "\t/* RC Manager: questions on stdin/stdout instead of message boxes */\n"
+            "\tif (getenv(\"RC_MANAGER_PROMPTS\"))\n"
+            "\t\treturn TRUE;\n",
+        ),
+        (
+            "\tif (freerdp_settings_get_bool(instance->context->settings, FreeRDP_CredentialsFromStdin))\n"
+            "\t\treturn client_cli_authenticate_ex(instance, username, password, domain, reason);\n",
+            "\tif (freerdp_settings_get_bool(instance->context->settings, FreeRDP_CredentialsFromStdin) ||\n"
+            "\t    getenv(\"RC_MANAGER_PROMPTS\"))\n"
+            "\t\treturn client_cli_authenticate_ex(instance, username, password, domain, reason);\n",
+        ),
+    ],
+    "wf_event.c": [
+        (
+            "\t\tif (gui_thread_info.hwndFocus != wfc->hWndParent)\n",
+            "\t\t/* RC Manager: keys also while wfreerdp's own (embedded) window has the focus */\n"
+            "\t\tif (gui_thread_info.hwndFocus != wfc->hWndParent &&\n"
+            "\t\t    gui_thread_info.hwndFocus != g_main_hWnd)\n",
+        ),
+    ],
+}
 
-for old, new in PATCHES:
-    if text.count(old) != 1:
-        sys.exit(f"patch-freerdp: expected text not found exactly once in {src}:\n{old}")
-    text = text.replace(old, new)
-
-src.write_text(text, encoding="utf-8", newline="\n")
-print(f"patched {src}")
+for name, patches in PATCHES.items():
+    src = client / name
+    text = src.read_text(encoding="utf-8")
+    for old, new in patches:
+        if text.count(old) != 1:
+            sys.exit(f"patch-freerdp: expected text not found exactly once in {src}:\n{old}")
+        text = text.replace(old, new)
+    src.write_text(text, encoding="utf-8", newline="\n")
+    print(f"patched {src}")

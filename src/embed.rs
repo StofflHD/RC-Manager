@@ -471,15 +471,7 @@ mod imp {
         /// Gives the keyboard to a client window (or back to RC Manager with `None`). Child
         /// windows of other processes share RC Manager's input queue, so SetFocus works.
         pub fn focus(&self, win: Option<WinId>) {
-            let mut target = win.map(hwnd).unwrap_or(self.main);
-            // wfreerdp (/parent-window) reads the keyboard with a hook and only forwards keys
-            // while its parent – the host – has the focus, not its own window.
-            if class_name(target) == "FreeRDP" {
-                let parent = unsafe { GetParent(target) };
-                if !parent.is_null() {
-                    target = parent;
-                }
-            }
+            let target = win.map(hwnd).unwrap_or(self.main);
             unsafe { SetFocus(target) };
         }
 
