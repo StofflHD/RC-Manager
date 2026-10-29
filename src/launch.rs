@@ -643,7 +643,13 @@ Ctrl Shift <Key>C: copy-selection(CLIPBOARD)";
 fn plan_putty(conn: &Connection, cred: Option<&Credential>, putty: &str, embed: Option<&EmbedTarget>) -> Result<Plan> {
     let o = &conn.options.ssh;
     let mut plan = Plan { program: putty.to_string(), adopt_window: embed.is_some(), ..Default::default() };
-    let mut a: Vec<String> = vec!["-ssh".into(), "-P".into(), conn.effective_port().to_string()];
+    let mut a: Vec<String> = Vec::new();
+    // Font and colours from RC Manager's own saved session (own options below still apply).
+    #[cfg(windows)]
+    if let Some(profile) = putty_profile() {
+        a.extend(["-load".into(), profile.into()]);
+    }
+    a.extend(["-ssh".into(), "-P".into(), conn.effective_port().to_string()]);
     if let Some(c) = cred {
         if !c.username.is_empty() {
             a.extend(["-l".into(), c.username.clone()]);
@@ -679,6 +685,54 @@ fn plan_putty(conn: &Connection, cred: Option<&Credential>, putty: &str, embed: 
     plan.display = format!("{putty} {}", redact(&a, &[]));
     plan.args = a;
     Ok(plan)
+}
+
+/// PuTTY takes font and colours only from a saved session: RC Manager keeps its own one
+/// ("RC-Manager", rewritten at every start of PuTTY) with a larger font and green text on
+/// black. PuTTY's "Default Settings" and the user's own sessions stay untouched.
+#[cfg(windows)]
+fn putty_profile() -> Option<&'static str> {
+    use windows_sys::Win32::System::Registry::*;
+    const NAME: &str = "RC-Manager";
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let text = [
+        ("Font", "Consolas"),
+        ("Colour0", "0,255,0"),     // text
+        ("Colour1", "128,255,128"), // bold text
+        ("Colour2", "0,0,0"),       // background
+        ("Colour3", "0,0,0"),       // bold background
+        ("Colour4", "0,0,0"),       // text under the cursor
+        ("Colour5", "0,255,0"),     // cursor
+    ];
+    let numbers = [("FontHeight", 12u32), ("FontIsBold", 0), ("FontCharSet", 0), ("FontQuality", 3)];
+    let key = wide(&format!(r"Software\SimonTatham\PuTTY\Sessions\{NAME}"));
+    unsafe {
+        let mut h: HKEY = std::ptr::null_mut();
+        let created = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut h,
+            std::ptr::null_mut(),
+        );
+        if created != 0 {
+            return None;
+        }
+        let mut ok = true;
+        for (name, value) in text {
+            let v = wide(value);
+            ok &= RegSetValueExW(h, wide(name).as_ptr(), 0, REG_SZ, v.as_ptr().cast(), (v.len() * 2) as u32) == 0;
+        }
+        for (name, value) in numbers {
+            ok &= RegSetValueExW(h, wide(name).as_ptr(), 0, REG_DWORD, (&value as *const u32).cast(), 4) == 0;
+        }
+        RegCloseKey(h);
+        ok.then_some(NAME)
+    }
 }
 
 fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: Option<&EmbedTarget>) -> Result<Plan> {
