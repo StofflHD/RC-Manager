@@ -14,6 +14,14 @@
 //! This needs X11; on Wayland desktops RC Manager runs via XWayland (see `main.rs`). On
 //! Windows the same is done with Win32 child windows (see the `windows` implementation below).
 
+/// Result of typing text into a session (see `Embedder::type_text`), sent from its thread.
+pub type Typed = std::sync::mpsc::Receiver<Result<(), String>>;
+
+/// Pause after the key that wakes a locked screen, before the password is typed.
+const WAKE_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Pause between two typed characters.
+const KEY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Window id: an X11 window (32 bits) or a Win32 `HWND`.
 #[cfg(not(windows))]
 pub type WinId = u32;
@@ -178,6 +186,16 @@ mod imp {
             true
         }
 
+        /// Types `text` and Enter into the client window `win` with XTEST, like a keyboard (the
+        /// first key, Control, wakes a locked screen). Stops as soon as `win` loses the focus.
+        pub fn type_text(&self, win: WinId, text: String) -> Result<super::Typed> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(super::xtest_type(win, &text).map_err(|e| format!("{e:#}")));
+            });
+            Ok(rx)
+        }
+
         pub fn destroy(&self, host: WinId) {
             let _ = self.conn.destroy_window(host);
             let _ = self.conn.flush();
@@ -193,6 +211,92 @@ mod imp {
             self.conn.extension_information(shape::X11_EXTENSION_NAME).ok().flatten().is_some()
         }
     }
+}
+
+/// See `Embedder::type_text` (X11).
+#[cfg(target_os = "linux")]
+fn xtest_type(win: WinId, text: &str) -> anyhow::Result<()> {
+    use anyhow::{bail, Context};
+    use x11rb::connection::{Connection, RequestConnection};
+    use x11rb::protocol::xproto::{ConnectionExt as _, KEY_PRESS_EVENT, KEY_RELEASE_EVENT};
+    use x11rb::protocol::xtest::{self, ConnectionExt as _};
+
+    let (conn, screen) = x11rb::connect(None).context("Cannot connect to the X server")?;
+    let root = conn.setup().roots[screen].root;
+    if conn.extension_information(xtest::X11_EXTENSION_NAME)?.is_none() {
+        bail!("the X server has no XTEST extension");
+    }
+    let (min, max) = (conn.setup().min_keycode, conn.setup().max_keycode);
+    let map = conn.get_keyboard_mapping(min, max - min + 1)?.reply()?;
+    let per = (map.keysyms_per_keycode as usize).max(1);
+    // Keycode and level of a keysym; levels 0/1 are plain/Shift, 4/5 AltGr/AltGr+Shift.
+    let find = |sym: u32| {
+        [0usize, 1, 4, 5].into_iter().find_map(|level| {
+            map.keysyms.chunks(per).position(|ks| ks.get(level) == Some(&sym)).map(|i| (min + i as u8, level))
+        })
+    };
+    let modifier = |sym: u32, name: &str| find(sym).map(|k| k.0).with_context(|| format!("no {name} key in the keyboard layout"));
+    let (control, ret) = (modifier(0xffe3, "Control")?, modifier(0xff0d, "Return")?);
+    let mut keys = Vec::new();
+    for c in text.chars() {
+        let cp = c as u32;
+        let sym = if (0x20..=0x7e).contains(&cp) || (0xa0..=0xff).contains(&cp) { cp } else { 0x0100_0000 | cp };
+        // Never name the character: it is part of a password.
+        let Some((code, level)) = find(sym) else { bail!("a character of the password is not on the keyboard layout") };
+        keys.push((code, level % 2 == 1, level >= 4));
+    }
+    let shift = modifier(0xffe1, "Shift")?;
+    let altgr = if keys.iter().any(|k| k.2) { Some(modifier(0xfe03, "AltGr")?) } else { None };
+    let focused = || -> bool {
+        let Ok(Ok(r)) = conn.get_input_focus().map(|c| c.reply()) else { return false };
+        let mut w = r.focus;
+        for _ in 0..64 {
+            if w == win {
+                return true;
+            }
+            if w == root || w == 0 {
+                return false;
+            }
+            match conn.query_tree(w).map(|c| c.reply()) {
+                Ok(Ok(t)) => w = t.parent,
+                _ => return false,
+            }
+        }
+        false
+    };
+    let key = |code: u8, down: bool| -> anyhow::Result<()> {
+        let kind = if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT };
+        conn.xtest_fake_input(kind, code, x11rb::CURRENT_TIME, root, 0, 0, 0)?;
+        conn.flush()?;
+        Ok(())
+    };
+    if !focused() {
+        bail!("the session does not have the keyboard focus");
+    }
+    key(control, true)?;
+    key(control, false)?;
+    std::thread::sleep(WAKE_DELAY);
+    for (code, with_shift, with_altgr) in keys.into_iter().chain(std::iter::once((ret, false, false))) {
+        if !focused() {
+            bail!("the session lost the keyboard focus, typing stopped");
+        }
+        if with_altgr {
+            key(altgr.unwrap_or(control), true)?;
+        }
+        if with_shift {
+            key(shift, true)?;
+        }
+        key(code, true)?;
+        key(code, false)?;
+        if with_shift {
+            key(shift, false)?;
+        }
+        if with_altgr {
+            key(altgr.unwrap_or(control), false)?;
+        }
+        std::thread::sleep(KEY_DELAY);
+    }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -238,6 +342,9 @@ mod imp {
         pub fn has_focus(&self, _win: Option<WinId>) -> bool {
             true
         }
+        pub fn type_text(&self, _win: WinId, _text: String) -> Result<super::Typed> {
+            anyhow::bail!("typing into sessions is not supported on this system")
+        }
         pub fn destroy(&self, _host: WinId) {}
         pub fn can_adopt(&self) -> bool {
             false
@@ -259,7 +366,10 @@ mod imp {
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
     use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, CombineRgn, CreateRectRgn, DeleteObject, GetStockObject, ScreenToClient, SetWindowRgn, BLACK_BRUSH, RGN_DIFF};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, SetFocus, VK_LBUTTON};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, GetKeyboardLayout, MapVirtualKeyExW, SendInput, SetFocus, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, VK_LBUTTON,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     pub struct Embedder {
@@ -304,6 +414,85 @@ mod imp {
         let mut buf = [0u16; 128];
         let n = unsafe { GetClassNameW(w, buf.as_mut_ptr(), buf.len() as i32) };
         String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    }
+
+    /// Whether `win` (or a window inside it) has the keyboard focus while RC Manager (`main`)
+    /// is the foreground window.
+    unsafe fn focus_in(main: HWND, win: HWND) -> bool {
+        if GetForegroundWindow() != main {
+            return false;
+        }
+        let thread = GetWindowThreadProcessId(main, std::ptr::null_mut());
+        let mut info: GUITHREADINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        GetGUIThreadInfo(thread, &mut info) != 0 && (info.hwndFocus == win || IsChild(win, info.hwndFocus) != 0)
+    }
+
+    /// One key press or release by scan code.
+    unsafe fn send_key(scan: u16, extended: bool, up: bool) {
+        let mut flags = KEYEVENTF_SCANCODE;
+        if extended {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: 0, wScan: scan, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        };
+        SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
+    }
+
+    /// See `Embedder::type_text` (Windows).
+    unsafe fn send_text(main: HWND, win: HWND, text: &str) -> Result<()> {
+        const SHIFT: u16 = 0x2a;
+        const CONTROL: u16 = 0x1d;
+        const ALT: u16 = 0x38; // with the extended flag: AltGr
+        const ENTER: u16 = 0x1c;
+        // The keyboard layout of the client's thread, which wfreerdp sends the keys with.
+        let layout = GetKeyboardLayout(GetWindowThreadProcessId(win, std::ptr::null_mut()));
+        let mut keys = Vec::new();
+        for c in text.encode_utf16() {
+            let r = VkKeyScanExW(c, layout);
+            let (vk, state) = ((r as u16 & 0xff) as u32, (r as u16 >> 8) & 0xff);
+            let scan = if r == -1 { 0 } else { MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, layout) as u16 };
+            // Never name the character: it is part of a password. Control or Alt alone would
+            // be a shortcut, not a character.
+            if scan == 0 || matches!(state & 6, 2 | 4) {
+                bail!("a character of the password is not on the keyboard layout");
+            }
+            keys.push((scan, state & 1 != 0, state & 6 == 6));
+        }
+        if !focus_in(main, win) {
+            bail!("the session does not have the keyboard focus");
+        }
+        send_key(CONTROL, false, false);
+        send_key(CONTROL, false, true);
+        std::thread::sleep(super::WAKE_DELAY);
+        for (scan, shift, altgr) in keys.into_iter().chain(std::iter::once((ENTER, false, false))) {
+            if !focus_in(main, win) {
+                bail!("the session lost the keyboard focus, typing stopped");
+            }
+            if altgr {
+                send_key(CONTROL, false, false);
+                send_key(ALT, true, false);
+            }
+            if shift {
+                send_key(SHIFT, false, false);
+            }
+            send_key(scan, false, false);
+            send_key(scan, false, true);
+            if shift {
+                send_key(SHIFT, false, true);
+            }
+            if altgr {
+                send_key(ALT, true, true);
+                send_key(CONTROL, false, true);
+            }
+            std::thread::sleep(super::KEY_DELAY);
+        }
+        Ok(())
     }
 
     /// Turns an adopted top-level window into a child window. Its frame stays: clients such as
@@ -509,6 +698,18 @@ mod imp {
                 }
                 info.hwndFocus == win || IsChild(win, info.hwndFocus) != 0
             }
+        }
+
+        /// Types `text` and Enter into the client window `win` with `SendInput` (scan codes, as
+        /// wfreerdp reads the keyboard with a hook; the first key, Control, wakes a locked
+        /// screen). Stops as soon as `win` loses the focus or RC Manager the foreground.
+        pub fn type_text(&self, win: WinId, text: String) -> Result<super::Typed> {
+            let main = id(self.main);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(unsafe { send_text(hwnd(main), hwnd(win), &text) }.map_err(|e| format!("{e:#}")));
+            });
+            Ok(rx)
         }
 
         /// The host's size has settled: wfreerdp sends a new resolution (/dynamic-resolution)

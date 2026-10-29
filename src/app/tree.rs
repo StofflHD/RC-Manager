@@ -152,6 +152,18 @@ impl App {
                 actions.push(if connected { Action::Reconnect(c.id) } else { Action::Connect(c.id) });
                 ui.close_menu();
             }
+            if connected && c.protocol == Protocol::Rdp {
+                let tab = self.unlock_tab(c.id).is_some();
+                let password = self.resolve_credential(c).is_some_and(|k| !k.password.is_empty());
+                let r = ui
+                    .add_enabled(tab && password, egui::Button::new("🔓 Unlock"))
+                    .on_hover_text("Types the stored password and Enter into the open session, e.g. on its lock screen.")
+                    .on_disabled_hover_text(if tab { "No password is stored for this connection." } else { "Only for a session open in a tab." });
+                if r.clicked() {
+                    actions.push(Action::Unlock(c.id));
+                    ui.close_menu();
+                }
+            }
             if ui.button("✏ Properties …").clicked() {
                 actions.push(Action::Edit(Sel::Connection(c.id)));
                 ui.close_menu();
