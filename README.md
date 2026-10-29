@@ -42,10 +42,11 @@ then keeps the active sessions and a counter of new warnings visible.
 RDP, SSH and VNC sessions open as tabs next to the connection properties and follow
 the window size, like in the original:
 
-* **RDP** – FreeRDP draws into the tab (`/parent-window`). With *Display → Adapt the remote
-  resolution to the window size* (default) the remote desktop gets the size of the tab and
-  follows every resize (needs Windows 8.1 / Server 2012 R2 or newer); without it, the desktop
-  (fixed resolution or the tab size) is scaled into the tab.
+* **RDP** – Linux: FreeRDP draws into the tab (`/parent-window`). Windows: the Remote Desktop
+  ActiveX control of mstsc.exe runs inside RC Manager's window (FreeRDP as fallback). With
+  *Display → Adapt the remote resolution to the window size* (default) the remote desktop gets
+  the size of the tab and follows every resize (needs Windows 8.1 / Server 2012 R2 or newer);
+  without it, the desktop (fixed resolution or the tab size) is scaled into the tab.
 * **SSH** – Linux: an xterm inside the tab, coloured like the light or dark theme. Windows:
   PuTTY's window is moved into the tab (Consolas 12, green on black).
 * **VNC** – TigerVNC's window is moved into the tab; the remote desktop is resized if the
@@ -80,7 +81,9 @@ Manager's database; later connections accept exactly this certificate without as
 server presents a different certificate later, the dialog appears again with a prominent
 warning. On Linux FreeRDP runs with its own configuration directory below RC Manager's data, so
 its certificate store is not used; on Windows the patched `wfreerdp` asks RC Manager instead of
-showing its own dialog (see *Installation (Windows)*).
+showing its own dialog (see *Installation (Windows)*). The Windows RDP control instead uses
+Windows' own certificate dialog and trust store, like mstsc; *Do not verify certificate* switches its
+server authentication off.
 
 ## Installation (AppImage)
 
@@ -110,8 +113,9 @@ binary) the dialog links to the release page.
 
 ## Installation (Windows)
 
-Two packages for Windows 10/11 (x64), both with **FreeRDP 3** (`wfreerdp`, with H.264 via OpenH264), **PuTTY** and the
-**TigerVNC** viewer in the folder `clients` next to `rc-manager.exe`:
+Two packages for Windows 10/11 (x64), both with **FreeRDP 3** (`wfreerdp` with H.264 via
+OpenH264, the fallback for RDP), **PuTTY** and the **TigerVNC** viewer in the folder `clients`
+next to `rc-manager.exe`:
 
 * `RC-Manager-<version>-windows-x64-setup.exe` – installer with a Start menu entry. It installs
   for the current user without administrator rights (an installation for all users can be
@@ -228,7 +232,8 @@ the original to AES before exporting.
   `vault.key` (mode 0600); with a master password it is derived with Argon2id and never stored.
 * FreeRDP 3 gets passwords via an environment variable (`/args-from:env:`), `sshpass`,
   `vncviewer` and PuTTY (`-pwfile`) via short-lived files with mode 0600 in `$XDG_RUNTIME_DIR`
-  (Windows: the user's temp folder). Only FreeRDP 2 and `{P}` in external commands put the
+  (Windows: the user's temp folder). The Windows RDP control gets the password inside RC
+  Manager's process, without files or command lines. Only FreeRDP 2 and `{P}` in external commands put the
   password into the process list; the application warns about that.
 
 ## Security notes and differences to the original
@@ -251,7 +256,8 @@ Hardening in this version:
 * FreeRDP 3 gets its arguments via an environment variable (readable only by the user), so
   stdin stays free for certificate questions; with sshpass, ssh accepts new host keys on first
   use (`StrictHostKeyChecking=accept-new`) but still refuses changed ones.
-* Passwords never appear on the command line with FreeRDP 3, sshpass, vncviewer and PuTTY; temporary
+* Passwords never appear on the command line with the Windows RDP control, FreeRDP 3, sshpass,
+  vncviewer and PuTTY; temporary
   password files are created exclusively (`O_EXCL`, mode 0600) and removed after 20 s or on exit.
 * The data directory is mode 0700, the database 0600 (host and user names are stored in plain text).
 * Changing the master password is a single transaction; the old local key file is deleted.
