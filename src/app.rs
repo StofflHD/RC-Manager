@@ -9,7 +9,7 @@ use crate::store::{Data, Store};
 use crate::theme;
 use egui::{Align2, RichText};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -35,6 +35,8 @@ struct Settings {
     auto_lock_minutes: u32,
     /// Open RDP, SSH and VNC sessions as tabs inside the window (X11/XWayland).
     embed_sessions: bool,
+    /// Windows: RDP in tabs with the Remote Desktop ActiveX control (mstsc's) instead of FreeRDP.
+    rdp_activex: bool,
     /// Updater: check GitHub for a new version at start (at most once a day).
     update_auto_check: bool,
     /// Proxy for the updater, e.g. `http://proxy:3128` (empty = none).
@@ -56,6 +58,7 @@ impl Default for Settings {
             log_hidden: false,
             auto_lock_minutes: 15,
             embed_sessions: true,
+            rdp_activex: true,
             update_auto_check: true,
             update_proxy: String::new(),
             update_last_check: 0,
@@ -429,6 +432,8 @@ pub struct App {
 
     /// X11 embedding of sessions; `None` without X11 or when switched off.
     embedder: Option<Embedder>,
+    /// RDP sessions running in the ActiveX control (Windows), by session id.
+    ax_sessions: HashMap<u64, crate::rdpax::RdpAx>,
     embed_checked: bool,
     tabs: Vec<SessionTab>,
     /// Session shown in the central area; `None` shows the connection properties.
@@ -636,6 +641,7 @@ impl App {
             last_activity: Instant::now(),
             picker: None,
             embedder: None,
+            ax_sessions: HashMap::new(),
             embed_checked: false,
             tabs: Vec::new(),
             active_tab: None,
@@ -1175,6 +1181,23 @@ impl App {
 
     fn launch(&mut self, conn: &Connection, cred: Option<&Credential>) {
         let embed = self.embed_target(conn);
+        // Windows: RDP in a tab with the ActiveX control; FreeRDP if it is off or not available.
+        if let Some(t) = embed.as_ref().filter(|_| cfg!(windows) && self.s.rdp_activex && conn.protocol == Protocol::Rdp) {
+            if !conn.options.rdp.remote_app.trim().is_empty() {
+                self.push(Level::Info, format!("{}: RemoteApp runs with FreeRDP.", conn.name));
+            } else {
+                match crate::rdpax::RdpAx::connect(t.host, t.width, t.height, conn, cred) {
+                    Ok(ax) => {
+                        if !conn.options.rdp.extra_args.trim().is_empty() {
+                            self.push(Level::Warn, format!("{}: the extra FreeRDP arguments are ignored by the Windows RDP client.", conn.name));
+                        }
+                        self.start_ax_session(conn, cred, t.host, ax);
+                        return;
+                    }
+                    Err(e) => self.push(Level::Warn, format!("{}: Windows RDP client not available ({e:#}), using FreeRDP.", conn.name)),
+                }
+            }
+        }
         let fingerprint = if conn.protocol == Protocol::Rdp {
             let host_port = format!("{}:{}", conn.host.trim(), conn.effective_port());
             self.store.trusted_fingerprint(&host_port).ok().flatten()
@@ -1257,6 +1280,62 @@ impl App {
         }
     }
 
+    /// Registers an RDP session running in the ActiveX control and opens its tab.
+    fn start_ax_session(&mut self, conn: &Connection, cred: Option<&Credential>, host: crate::embed::WinId, ax: crate::rdpax::RdpAx) {
+        let session = self.next_session;
+        self.next_session += 1;
+        self.push(Level::Info, format!("[{session}] {} started with the Windows RDP client.", conn.name));
+        self.sessions.insert(
+            session,
+            Session {
+                conn: conn.clone(),
+                cred: cred.map(|c| Credential { password: String::new(), ..c.clone() }),
+                name: conn.name.clone(),
+                started: Instant::now(),
+                display: "Windows RDP client (ActiveX)".into(),
+                pid: 0,
+                stdin: None,
+                recent: VecDeque::new(),
+                closing: false,
+                log: None,
+            },
+        );
+        self.ax_sessions.insert(session, ax);
+        self.tabs.push(SessionTab {
+            session,
+            name: conn.name.clone(),
+            icon: conn.protocol.icon(),
+            host,
+            adopt: None,
+            placed: None,
+            last_fit: Instant::now(),
+            resized: None,
+            size_told: Instant::now(),
+            opened: Instant::now(),
+            ended: None,
+        });
+        self.active_tab = Some(session);
+        self.session_focus = None;
+        if let Some(mut c) = self.connection(conn.id).cloned() {
+            c.last_connected = Some(now_string());
+            self.result(self.store.save_connection(&c));
+            if let Some(x) = self.data.connections.iter_mut().find(|x| x.id == c.id) {
+                *x = c;
+            }
+        }
+    }
+
+    /// Reports ActiveX sessions that have ended, like a client process that exited.
+    fn poll_ax_sessions(&mut self) {
+        let ended: Vec<(u64, String)> = self.ax_sessions.iter().filter_map(|(s, ax)| ax.poll().map(|r| (*s, r))).collect();
+        for (session, reason) in ended {
+            // Removing it closes the control's window.
+            if self.ax_sessions.remove(&session).is_some() {
+                self.events_tx.send(Event::Exited { session, code: None, reason: Some(reason) }).ok();
+            }
+        }
+    }
+
     fn quick_connect(&mut self) {
         let host = self.quick_host.trim().to_string();
         if host.is_empty() {
@@ -1278,6 +1357,7 @@ impl App {
     }
 
     fn poll_events(&mut self) {
+        self.poll_ax_sessions();
         while let Ok(ev) = self.events_rx.try_recv() {
             match ev {
                 Event::Prompt { session, text } if launch::is_credential_prompt(&text) => {
@@ -1334,7 +1414,7 @@ impl App {
                     let lvl = if line.contains("ERROR") { Level::Error } else if line.contains("WARN") { Level::Warn } else { Level::Info };
                     self.push(lvl, format!("[{session}] {name}: {line}"));
                 }
-                Event::Exited { session, code } => {
+                Event::Exited { session, code, reason: why } => {
                     if let Some(s) = self.sessions.remove(&session) {
                         // A terminal (SSH) session that never connected: read the ssh error from its
                         // recorded log before it is deleted, so the tab can show why. If nothing was
@@ -1360,6 +1440,8 @@ impl App {
                         let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into());
                         if let Some(reason) = &terminal_fail {
                             self.push(Level::Warn, format!("[{session}] {} could not connect: {reason}", s.name));
+                        } else if let Some(why) = &why {
+                            self.push(Level::Warn, format!("[{session}] {} ended: {why} ({}m {}s).", s.name, dur / 60, dur % 60));
                         } else {
                             self.push(Level::Warn, format!("[{session}] {} ended (exit code {code}, {}m {}s).", s.name, dur / 60, dur % 60));
                         }
@@ -1368,7 +1450,7 @@ impl App {
                         // a Reconnect button instead of letting it vanish. A terminal session that was
                         // logged out of (no failure in its log) closes as before.
                         let reason = if matches!(s.conn.protocol, Protocol::Rdp | Protocol::Vnc) {
-                            Some(format!("exit code {code}"))
+                            Some(why.unwrap_or_else(|| format!("exit code {code}")))
                         } else {
                             terminal_fail
                         };
@@ -1576,6 +1658,14 @@ impl App {
 
     /// Ends a session (closing its tab follows when the process has exited).
     fn stop_session(&mut self, session: u64) {
+        if let Some(ax) = self.ax_sessions.remove(&session) {
+            if let Some(s) = self.sessions.get_mut(&session) {
+                s.closing = true;
+            }
+            ax.disconnect();
+            self.events_tx.send(Event::Exited { session, code: Some(0), reason: None }).ok();
+            return;
+        }
         if let Some(s) = self.sessions.get_mut(&session) {
             s.closing = true;
             #[cfg(unix)]
@@ -1727,6 +1817,9 @@ impl App {
             let connecting = geom.4 && tab.opened.elapsed() < Duration::from_secs(30) && tab.size_told.elapsed() > Duration::from_secs(2);
             if tab.resized.is_some_and(|t| t.elapsed() > Duration::from_millis(400)) || connecting {
                 emb.resized(tab.host);
+                if let Some(ax) = self.ax_sessions.get(&tab.session) {
+                    ax.resize(geom.2, geom.3);
+                }
                 tab.resized = None;
                 tab.size_told = Instant::now();
             }
