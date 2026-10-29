@@ -312,6 +312,8 @@ struct SessionTab {
     /// Last geometry given to the host (physical pixels) and whether it was visible.
     placed: Option<Placement>,
     last_fit: Instant,
+    /// The host's size changed at this time; the client is told once the size has settled.
+    resized: Option<Instant>,
     /// When the tab was opened; the periodic refit only runs for a short while after this.
     opened: Instant,
     /// Set when the session ended on its own (host closed it, client crashed): the embedded
@@ -1168,6 +1170,7 @@ impl App {
                         adopt: plan.adopt_window.then(|| (pid, Instant::now())),
                         placed: None,
                         last_fit: Instant::now(),
+                        resized: None,
                         opened: Instant::now(),
                         ended: None,
                     });
@@ -1653,8 +1656,15 @@ impl App {
                 if let Err(e) = emb.place(tab.host, geom.0, geom.1, geom.2, geom.3, geom.4, &state.1) {
                     logs.push((Level::Warn, format!("{}: {e:#}", tab.name)));
                 }
+                if tab.placed.as_ref().is_some_and(|((_, _, w, h, _), _)| (*w, *h) != (geom.2, geom.3)) {
+                    tab.resized = Some(Instant::now());
+                }
                 tab.placed = Some(state.clone());
                 tab.last_fit = Instant::now();
+            }
+            if tab.resized.is_some_and(|t| t.elapsed() > Duration::from_millis(400)) {
+                emb.resized(tab.host);
+                tab.resized = None;
             }
             // Keyboard: a click into the session gives it the focus.
             if visible && self.session_focus != Some(tab.session) {

@@ -166,6 +166,9 @@ mod imp {
             let _ = self.conn.flush();
         }
 
+        /// The host's size has settled (X11 clients follow their window size by themselves).
+        pub fn resized(&self, _host: WinId) {}
+
         pub fn destroy(&self, host: WinId) {
             let _ = self.conn.destroy_window(host);
             let _ = self.conn.flush();
@@ -219,6 +222,7 @@ mod imp {
             None
         }
         pub fn focus(&self, _win: Option<WinId>) {}
+        pub fn resized(&self, _host: WinId) {}
         pub fn destroy(&self, _host: WinId) {}
         pub fn can_adopt(&self) -> bool {
             false
@@ -469,6 +473,14 @@ mod imp {
         pub fn focus(&self, win: Option<WinId>) {
             let target = win.map(hwnd).unwrap_or(self.main);
             unsafe { SetFocus(target) };
+        }
+
+        /// The host's size has settled: wfreerdp sends a new resolution (/dynamic-resolution)
+        /// only when a user ends dragging its window, which this message tells it.
+        pub fn resized(&self, host: WinId) {
+            for c in children(hwnd(host)) {
+                unsafe { PostMessageW(c, WM_EXITSIZEMOVE, 0, 0) };
+            }
         }
 
         pub fn destroy(&self, host: WinId) {
