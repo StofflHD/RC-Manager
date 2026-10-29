@@ -169,6 +169,15 @@ mod imp {
         /// The host's size has settled (X11 clients follow their window size by themselves).
         pub fn resized(&self, _host: WinId) {}
 
+        /// Whether RC Manager's window is the active one and an embedded client has the focus;
+        /// on X11 the window manager restores the focus of embedded clients by itself.
+        pub fn active(&self) -> bool {
+            false
+        }
+        pub fn has_focus(&self, _win: Option<WinId>) -> bool {
+            true
+        }
+
         pub fn destroy(&self, host: WinId) {
             let _ = self.conn.destroy_window(host);
             let _ = self.conn.flush();
@@ -223,6 +232,12 @@ mod imp {
         }
         pub fn focus(&self, _win: Option<WinId>) {}
         pub fn resized(&self, _host: WinId) {}
+        pub fn active(&self) -> bool {
+            false
+        }
+        pub fn has_focus(&self, _win: Option<WinId>) -> bool {
+            true
+        }
         pub fn destroy(&self, _host: WinId) {}
         pub fn can_adopt(&self) -> bool {
             false
@@ -473,6 +488,27 @@ mod imp {
         pub fn focus(&self, win: Option<WinId>) {
             let target = win.map(hwnd).unwrap_or(self.main);
             unsafe { SetFocus(target) };
+        }
+
+        /// Whether RC Manager's window is the foreground window (embedded clients are children
+        /// of it, so this stays true while one of them has the focus).
+        pub fn active(&self) -> bool {
+            unsafe { GetForegroundWindow() == self.main }
+        }
+
+        /// Whether `win` (or a window inside it) has the keyboard focus of RC Manager's thread –
+        /// with an embedded client that is the thread's focus, as their input is attached.
+        pub fn has_focus(&self, win: Option<WinId>) -> bool {
+            let Some(win) = win.map(hwnd) else { return true };
+            unsafe {
+                let thread = GetWindowThreadProcessId(self.main, std::ptr::null_mut());
+                let mut info: GUITHREADINFO = std::mem::zeroed();
+                info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+                if GetGUIThreadInfo(thread, &mut info) == 0 {
+                    return true;
+                }
+                info.hwndFocus == win || IsChild(win, info.hwndFocus) != 0
+            }
         }
 
         /// The host's size has settled: wfreerdp sends a new resolution (/dynamic-resolution)

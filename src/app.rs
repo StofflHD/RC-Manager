@@ -436,6 +436,8 @@ pub struct App {
     session_rect: Option<egui::Rect>,
     /// Session that has the keyboard focus.
     session_focus: Option<u64>,
+    /// Last time the focus was handed back to a session (see `has_focus`).
+    focus_checked: Instant,
     /// Connections to open at start (`--connect`).
     pending_connect: Vec<String>,
     /// Sessions that were open at the last exit, offered for reopening once unlocked.
@@ -627,6 +629,7 @@ impl App {
             reach: None,
             session_rect: None,
             session_focus: None,
+            focus_checked: Instant::now(),
             pending_connect: connect,
             reopen_offer,
             reopen_sel: None,
@@ -1692,6 +1695,19 @@ impl App {
         let rc_click = ctx.input(|i| i.pointer.any_pressed()) || ctx.wants_keyboard_input();
         if self.session_focus.is_some() && rc_click {
             focus_change = Some(None);
+        }
+        // Back in the foreground (Alt+Tab, taskbar), Windows gives the focus to RC Manager's
+        // window – possibly only after the first frame. As long as RC Manager is active, the
+        // session that should have the focus gets it back (wfreerdp ignores mouse and keyboard
+        // without it); retried at most every 300 ms.
+        let active = emb.active();
+        if active && focus_change.is_none() && self.focus_checked.elapsed() > Duration::from_millis(300) {
+            if let Some(tab) = self.tabs.iter().find(|t| Some(t.session) == self.session_focus && t.ended.is_none()) {
+                if !emb.has_focus(emb.client_of(tab.host)) {
+                    focus_change = Some(Some((tab.session, tab.host)));
+                    self.focus_checked = Instant::now();
+                }
+            }
         }
         match focus_change {
             Some(Some((session, host))) => {

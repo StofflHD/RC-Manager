@@ -933,7 +933,9 @@ pub fn is_credential_prompt(text: &str) -> bool {
 /// FreeRDP also warns on every clipboard copy whose HTML or image format the other side cannot
 /// deliver or convert (plain text still transfers); that is a normal limitation, not an error.
 /// On Windows wfreerdp starts with six lines saying it is deprecated (RC Manager needs it: only
-/// it can draw into a tab) and a note that the build has no Azure AD logon.
+/// it can draw into a tab) and a note that the build has no Azure AD logon. xrdp (Linux servers)
+/// sends the connection's finalization messages in another order than FreeRDP expects, which it
+/// reports as "unexpected server message" while the connection works.
 fn is_noise(line: &str) -> bool {
     line.contains("no RDP scancode found")
         || line.contains("[tls_print_new_certificate_warn]")
@@ -943,6 +945,7 @@ fn is_noise(line: &str) -> bool {
         || line.contains("[freerdp_warn_deprecated]")
         || line.contains("[warn_contact_details]")
         || line.contains("[nego_enable_aad]")
+        || (line.contains("[rdp_handle_sc_flags]") && line.contains("unexpected server message"))
 }
 
 /// Splits a stream into lines and also reports an unfinished line that is a prompt.
@@ -1137,6 +1140,7 @@ mod tests {
         assert!(is_noise("[WARN][com.freerdp.client.common.cmdline] - [freerdp_warn_deprecated]: As replacement there is a SDL3 based client available."));
         assert!(is_noise("[WARN][com.freerdp.client.common.cmdline] - [warn_contact_details]: Be prepared to fix issues yourself though"));
         assert!(is_noise("[WARN][com.freerdp.core.nego] - [nego_enable_aad]: This build does not support AAD security, disabling."));
+        assert!(is_noise("[WARN][com.freerdp.core.rdp] - [rdp_handle_sc_flags][00000213AFD770A0]: [CONNECTION_STATE_FINALIZATION_CLIENT_SYNC] unexpected server message, expected flag FINALIZE_SC_SYNCHRONIZE_PDU [0x00000001] [have NO_FLAG_SET [0x00000000]]"));
         assert!(!is_noise(&format!("{pre}[tls_print_certificate_name_mismatch_error]: A valid certificate for the wrong name should NOT be trusted!")));
         assert!(!is_noise("Certificate details for 192.0.2.10:3389 (RDP-Server):"));
     }
