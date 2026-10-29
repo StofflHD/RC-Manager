@@ -258,7 +258,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: C:/freerdp
-          key: freerdp-${{ env.FREERDP_VERSION }}-windows-2022-static-rcprompts-v2
+          key: freerdp-${{ env.FREERDP_VERSION }}-windows-2022-static-rcprompts-v3
 
       - name: Build FreeRDP ${{ env.FREERDP_VERSION }} (wfreerdp)
         if: steps.freerdp-win-cache.outputs.cache-hit != 'true'
