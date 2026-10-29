@@ -40,7 +40,7 @@ mod imp {
     use anyhow::{anyhow, bail, Context, Result};
     use std::cell::Cell;
     use windows::core::{Interface, IUnknown, BSTR, GUID, HSTRING, PCWSTR, VARIANT};
-    use windows::Win32::System::Com::{IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS};
+    use windows::Win32::System::Com::{CLSIDFromProgID, StringFromGUID2, IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS};
     use windows::Win32::System::Ole::{OleInitialize, DISPID_PROPERTYPUT};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
@@ -141,10 +141,17 @@ mod imp {
                 let (w, h) = (r.right.max(width as i32), r.bottom.max(height as i32));
                 let mut last = anyhow!("the Remote Desktop ActiveX control is not installed");
                 for progid in PROGIDS {
+                    // ATL takes text that is no registered class for a web address and would
+                    // quietly create a browser: only create classes that exist, by CLSID.
+                    let Ok(clsid) = CLSIDFromProgID(&HSTRING::from(progid)) else { continue };
+                    let mut text = [0u16; 40];
+                    if StringFromGUID2(&clsid, &mut text) == 0 {
+                        continue;
+                    }
                     let window = CreateWindowExW(
                         0,
                         wide("AtlAxWin").as_ptr(),
-                        wide(progid).as_ptr(),
+                        text.as_ptr(),
                         WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                         0,
                         0,
@@ -164,7 +171,7 @@ mod imp {
                         continue;
                     }
                     let unknown = IUnknown::from_raw(raw);
-                    let ax = match unknown.cast::<IDispatch>() {
+                    let ax = match unknown.cast::<IDispatch>().map_err(anyhow::Error::from).and_then(|d| Disp(d.clone()).id("Server").map(|_| d)) {
                         Ok(d) => RdpAx { window, client: Disp(d), dynamic: Cell::new(false), state: Cell::new(2), size: Cell::new((w as u32, h as u32)) },
                         Err(e) => {
                             DestroyWindow(window);
