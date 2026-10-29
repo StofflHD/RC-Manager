@@ -314,6 +314,8 @@ struct SessionTab {
     last_fit: Instant,
     /// The host's size changed at this time; the client is told once the size has settled.
     resized: Option<Instant>,
+    /// Last time the client was told its size (also repeated while a new session connects).
+    size_told: Instant,
     /// When the tab was opened; the periodic refit only runs for a short while after this.
     opened: Instant,
     /// Set when the session ended on its own (host closed it, client crashed): the embedded
@@ -1171,6 +1173,7 @@ impl App {
                         placed: None,
                         last_fit: Instant::now(),
                         resized: None,
+                        size_told: Instant::now(),
                         opened: Instant::now(),
                         ended: None,
                     });
@@ -1662,9 +1665,14 @@ impl App {
                 tab.placed = Some(state.clone());
                 tab.last_fit = Instant::now();
             }
-            if tab.resized.is_some_and(|t| t.elapsed() > Duration::from_millis(400)) {
+            // A new (or reconnected) RDP session can only follow the tab size once its display
+            // channel is up, so the size is also repeated while it connects; wfreerdp ignores it
+            // when nothing changed.
+            let connecting = geom.4 && tab.opened.elapsed() < Duration::from_secs(30) && tab.size_told.elapsed() > Duration::from_secs(2);
+            if tab.resized.is_some_and(|t| t.elapsed() > Duration::from_millis(400)) || connecting {
                 emb.resized(tab.host);
                 tab.resized = None;
+                tab.size_told = Instant::now();
             }
             // Keyboard: a click into the session gives it the focus.
             if visible && self.session_focus != Some(tab.session) {
