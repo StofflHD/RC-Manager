@@ -1619,14 +1619,17 @@ impl App {
         // Menus, dialogs and the sidebar overlay over the session: cut out of the session window
         // (their shadows stay hidden), or hide it without SHAPE. Tooltips are excluded: they fade
         // in and follow the hovered entry, so cutting a hole for them made the session flicker
-        // (e.g. hovering a host in the collapsed-sidebar overlay) for little benefit.
+        // (e.g. hovering a host in the collapsed-sidebar overlay) for little benefit. Within an
+        // open menu they are cut out, though, so the hint of a menu entry is not cropped.
+        let menu_open = ctx.is_context_menu_open() || ctx.memory(|m| m.any_popup_open());
         let covers: Vec<egui::Rect> = rect
             .map(|r| {
                 ctx.memory(|m| {
                     m.areas()
                         .visible_layer_ids()
                         .into_iter()
-                        .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::PanelResizeLine | egui::Order::Tooltip))
+                        .filter(|l| !matches!(l.order, egui::Order::Background | egui::Order::PanelResizeLine))
+                        .filter(|l| l.order != egui::Order::Tooltip || menu_open)
                         .filter_map(|l| m.area_rect(l.id))
                         .map(|a| a.expand(1.0))
                         .filter(|a| a.intersects(r))
