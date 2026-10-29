@@ -110,6 +110,12 @@ Shot '2-ssh-putty-tab'
 [U]::Describe('PuTTY') | Out-File -Append (Join-Path $Out 'info.txt')
 Get-Process | Where-Object { $_.ProcessName -match 'putty|rc-manager' } | Select-Object Id, ProcessName, MainWindowTitle |
     Out-File -Append (Join-Path $Out 'info.txt')
+# Closing RC Manager normally ends the sessions in its tabs (PuTTY must not keep running).
+$p.CloseMainWindow() | Out-Null
+$p.WaitForExit(15000) | Out-Null
+Start-Sleep -Seconds 2
+$left = @(Get-Process putty -ErrorAction SilentlyContinue)
+"After closing RC Manager: exited=$($p.HasExited), PuTTY processes left: $($left.Count)" | Out-File -Append (Join-Path $Out 'info.txt')
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-Get-Process putty -ErrorAction SilentlyContinue | Stop-Process -Force
+$left | Stop-Process -Force -ErrorAction SilentlyContinue
 exit 0
