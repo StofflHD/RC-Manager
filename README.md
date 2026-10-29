@@ -1,6 +1,6 @@
 # RC Manager
 
-RC Manager (Remote Connection Manager) is a Rust re-implementation of the Windows program **RDP-Manager 4.9.9.3** (Cinspiration) for Linux
+RC Manager (Remote Connection Manager) is a Rust re-implementation of the Windows program **RDP-Manager** (Cinspiration) for Linux
 and Windows: a connection manager with a folder tree, stored credentials and quick connect. The
 sessions themselves run in established clients – FreeRDP, OpenSSH/xterm or PuTTY, TigerVNC and
 your browser – embedded as tabs in RC Manager's window.
