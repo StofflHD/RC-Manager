@@ -110,7 +110,7 @@ binary) the dialog links to the release page.
 
 ## Installation (Windows)
 
-Two packages for Windows 10/11 (x64), both with **FreeRDP 3** (`wfreerdp`), **PuTTY** and the
+Two packages for Windows 10/11 (x64), both with **FreeRDP 3** (`wfreerdp`, with H.264 via OpenH264), **PuTTY** and the
 **TigerVNC** viewer in the folder `clients` next to `rc-manager.exe`:
 
 * `RC-Manager-<version>-windows-x64-setup.exe` – installer with a Start menu entry. It installs

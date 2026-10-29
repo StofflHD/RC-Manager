@@ -28,8 +28,9 @@ https://github.com/StofflHD/RC-Manager
 rc-manager.exe     the program
 clients\\           bundled clients: FreeRDP (wfreerdp.exe), PuTTY (putty.exe), TigerVNC viewer
                    (vncviewer.exe) - used for RDP, SSH and VNC sessions in tabs
-licenses\\          licences of the bundled clients (FreeRDP: Apache-2.0, PuTTY: MIT,
-                   TigerVNC: GPL-2.0, source: https://github.com/TigerVNC/tigervnc)
+licenses\\          licences of the bundled clients (FreeRDP: Apache-2.0, OpenH264 in
+                   wfreerdp.exe: BSD-2-Clause, PuTTY: MIT, TigerVNC: GPL-2.0,
+                   source: https://github.com/TigerVNC/tigervnc)
 LICENSE.txt        RC Manager: GNU General Public License v3.0 or later
 
 Portable ZIP: the file rc-manager.portable keeps all data in the "data" folder next to
