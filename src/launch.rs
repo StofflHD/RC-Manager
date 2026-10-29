@@ -236,10 +236,11 @@ impl Tools {
         let label = |p: &str| if is_bundled(p) { format!("bundled ({p})") } else { p.to_string() };
         let show = |o: &Option<String>, missing: &str| o.as_deref().map(label).unwrap_or_else(|| missing.to_string());
         vec![
-            ("RDP (FreeRDP)", self.freerdp.as_ref().map(|(p, v)| format!("{} – v{v}", label(p))).unwrap_or_else(|| "not found – install FreeRDP or use the full RC Manager package".into())),
+            ("RDP (Windows)", "Remote Desktop ActiveX control of mstsc.exe – used for RDP in tabs".into()),
+            ("RDP fallback (FreeRDP)", self.freerdp.as_ref().map(|(p, v)| format!("{} – v{v}", label(p))).unwrap_or_else(|| "not found – install FreeRDP or use the full RC Manager package".into())),
             ("SSH (PuTTY)", show(&self.putty, "not found – SSH opens Windows' ssh in a console window")),
             ("VNC (TigerVNC)", show(&self.vncviewer, "not found – install the TigerVNC viewer")),
-            ("Browser", show(&self.opener, "not found")),
+            ("Browser", self.opener.as_deref().map(|p| format!("default browser (opened via {p})")).unwrap_or_else(|| "not found".into())),
         ]
     }
 

@@ -440,7 +440,9 @@ impl App {
                 });
                 ui.add_space(6.0);
                 let hint = if cfg!(windows) {
-                    "The installer and the portable ZIP of RC Manager include FreeRDP, PuTTY and the TigerVNC\n\
+                    "RDP tabs use the Remote Desktop client built into Windows; FreeRDP takes over for RemoteApp,\n\
+                     separate windows and when \"Options → Windows RDP Client in Tabs\" is off.\n\
+                     The installer and the portable ZIP of RC Manager include FreeRDP, PuTTY and the TigerVNC\n\
                      viewer (folder \"clients\" next to rc-manager.exe). Installed copies are used otherwise."
                 } else {
                     "Debian/Ubuntu: sudo apt install freerdp3-x11 tigervnc-viewer sshpass\n\
