@@ -169,6 +169,12 @@ mod imp {
         /// The host's size has settled (X11 clients follow their window size by themselves).
         pub fn resized(&self, _host: WinId) {}
 
+        /// Whether RC Manager's window is the active one (the window manager restores the focus
+        /// of embedded clients by itself on X11).
+        pub fn active(&self) -> bool {
+            true
+        }
+
         pub fn destroy(&self, host: WinId) {
             let _ = self.conn.destroy_window(host);
             let _ = self.conn.flush();
@@ -223,6 +229,9 @@ mod imp {
         }
         pub fn focus(&self, _win: Option<WinId>) {}
         pub fn resized(&self, _host: WinId) {}
+        pub fn active(&self) -> bool {
+            true
+        }
         pub fn destroy(&self, _host: WinId) {}
         pub fn can_adopt(&self) -> bool {
             false
@@ -473,6 +482,12 @@ mod imp {
         pub fn focus(&self, win: Option<WinId>) {
             let target = win.map(hwnd).unwrap_or(self.main);
             unsafe { SetFocus(target) };
+        }
+
+        /// Whether RC Manager's window is the foreground window (embedded clients are children
+        /// of it, so this stays true while one of them has the focus).
+        pub fn active(&self) -> bool {
+            unsafe { GetForegroundWindow() == self.main }
         }
 
         /// The host's size has settled: wfreerdp sends a new resolution (/dynamic-resolution)
