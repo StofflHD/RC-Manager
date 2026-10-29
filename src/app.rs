@@ -1327,6 +1327,11 @@ impl App {
 
     /// Reports ActiveX sessions that have ended, like a client process that exited.
     fn poll_ax_sessions(&mut self) {
+        let notes: Vec<(u64, String)> = self.ax_sessions.iter().filter_map(|(s, ax)| ax.note().map(|n| (*s, n))).collect();
+        for (session, note) in notes {
+            let name = self.sessions.get(&session).map(|s| s.name.clone()).unwrap_or_default();
+            self.push(Level::Warn, format!("[{session}] {name}: {note}"));
+        }
         let ended: Vec<(u64, String)> = self.ax_sessions.iter().filter_map(|(s, ax)| ax.poll().map(|r| (*s, r))).collect();
         for (session, reason) in ended {
             // Removing it closes the control's window.

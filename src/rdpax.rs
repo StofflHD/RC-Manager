@@ -130,6 +130,11 @@ mod imp {
         size: Cell<(u32, u32)>,
         want: Cell<(u32, u32)>,
         tried: Cell<Instant>,
+        /// Since when the session refuses the tab size, whether the desktop is scaled meanwhile,
+        /// and a message for RC Manager's log.
+        refused: Cell<Option<Instant>>,
+        scaled: Cell<bool>,
+        note: Cell<Option<String>>,
     }
 
     impl RdpAx {
@@ -194,6 +199,9 @@ mod imp {
                             size: Cell::new(size),
                             want: Cell::new(size),
                             tried: Cell::new(Instant::now()),
+                            refused: Cell::new(None),
+                            scaled: Cell::new(false),
+                            note: Cell::new(None),
                         },
                         Err(e) => {
                             DestroyWindow(window);
@@ -225,7 +233,6 @@ mod imp {
             }
             // A fixed resolution is scaled into the tab; otherwise the session gets the tab size.
             let fixed = o.resolution.split_once(['x', 'X']).and_then(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)));
-            let dynamic = o.dynamic_resolution || fixed.is_none();
             let (w, h) = if o.dynamic_resolution { (width, height) } else { fixed.unwrap_or((width, height)) };
             let (w, h) = super::desktop_size(w, h);
             c.put("DesktopWidth", w as i32)?;
@@ -241,7 +248,8 @@ mod imp {
             a.put("EnableCredSspSupport", true)?;
             // 2: warn about certificates that cannot be verified (the control's own dialog).
             a.put("AuthenticationLevel", if o.ignore_certificate { 0 } else { 2 })?;
-            a.put("SmartSizing", !dynamic)?;
+            // Without dynamic resolution the desktop is scaled into the tab, as with FreeRDP.
+            a.put("SmartSizing", !o.dynamic_resolution)?;
             a.put("EnableAutoReconnect", true)?;
             a.put("GrabFocusOnConnect", false).ok();
             a.put("RedirectPrinters", o.printers)?;
@@ -310,9 +318,36 @@ mod imp {
             // Physical size in millimetres, for 96 dpi.
             let (pw, ph) = (w * 254 / 960, h * 254 / 960);
             let args = vec![VARIANT::from(w), VARIANT::from(h), VARIANT::from(pw), VARIANT::from(ph), VARIANT::from(0u32), VARIANT::from(100u32), VARIANT::from(100u32)];
-            if self.client.call("UpdateSessionDisplaySettings", args).is_ok() {
-                self.size.set((w, h));
+            match self.client.call("UpdateSessionDisplaySettings", args) {
+                Ok(_) => {
+                    self.size.set((w, h));
+                    self.refused.set(None);
+                    if self.scaled.replace(false) {
+                        self.smart_sizing(false);
+                    }
+                }
+                Err(e) => {
+                    // Shortly after connecting this is normal. If the session keeps refusing,
+                    // scale the desktop into the tab so nothing is cut off.
+                    let since = *self.refused.get().get_or_insert_with(Instant::now);
+                    self.refused.set(Some(since));
+                    if since.elapsed() > Duration::from_secs(20) && !self.scaled.replace(true) {
+                        self.smart_sizing(true);
+                        self.note.set(Some(format!("the server does not take the tab size ({w}x{h}: {e:#}); the desktop is scaled instead")));
+                    }
+                }
             }
+        }
+
+        fn smart_sizing(&self, on: bool) {
+            if let Ok(a) = self.client.newest(&["AdvancedSettings9", "AdvancedSettings8", "AdvancedSettings7", "AdvancedSettings6", "AdvancedSettings5", "AdvancedSettings2"]) {
+                a.put("SmartSizing", on).ok();
+            }
+        }
+
+        /// A message for RC Manager's log, once.
+        pub fn note(&self) -> Option<String> {
+            self.note.take()
         }
 
         /// Ends the session (RC Manager closes the tab or exits).
@@ -351,6 +386,9 @@ impl RdpAx {
         None
     }
     pub fn resize(&self, _width: u32, _height: u32) {}
+    pub fn note(&self) -> Option<String> {
+        None
+    }
     pub fn disconnect(&self) {}
 }
 
