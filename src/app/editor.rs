@@ -261,6 +261,8 @@ impl App {
                 ui.centered_and_justified(|ui| ui.label(RichText::new("Select a connection or folder.\nDouble-click connects.").weak()));
                 return;
             };
+            let mut create_cred: Option<Credential> = None;
+            let mut cancel_cred = false;
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 match &mut editor {
                     Editor::Folder(f) => {
@@ -332,8 +334,45 @@ impl App {
                             Self::folder_combo(ui, "conn_parent", &mut c.parent, &choices);
                             ui.end_row();
                             ui.label("Credentials");
-                            Self::credential_combo(ui, "conn_cred", &mut c.credential, &self.data.credentials, true, inherited.as_ref());
+                            ui.horizontal(|ui| {
+                                Self::credential_combo(ui, "conn_cred", &mut c.credential, &self.data.credentials, true, inherited.as_ref());
+                                let open = self.new_cred.as_ref().is_some_and(|(id, _)| *id == c.id);
+                                if ui.add_enabled(!open, egui::Button::new("+ New …")).on_hover_text("Create new credentials for this connection").clicked() {
+                                    self.new_cred = Some((c.id, Credential::new(&c.name)));
+                                }
+                            });
                             ui.end_row();
+                            // New credentials, stored and assigned to this connection on "Create".
+                            if let Some((_, nc)) = self.new_cred.as_mut().filter(|(id, _)| *id == c.id) {
+                                ui.label("");
+                                ui.vertical(|ui| ui.group(|ui| {
+                                    egui::Grid::new("new_cred_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                                        ui.label("Name");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.name).desired_width(220.0));
+                                        ui.end_row();
+                                        ui.label("User");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.username).desired_width(220.0));
+                                        ui.end_row();
+                                        ui.label("Domain");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.domain).hint_text("optional").desired_width(220.0));
+                                        ui.end_row();
+                                        ui.label("Password");
+                                        ui.add(egui::TextEdit::singleline(&mut nc.password).password(true).desired_width(220.0));
+                                        ui.end_row();
+                                    });
+                                    ui.horizontal(|ui| {
+                                        let ok = !nc.name.trim().is_empty();
+                                        if ui.add_enabled(ok, egui::Button::new("Create")).on_disabled_hover_text("A name is needed.").clicked() {
+                                            create_cred = Some(nc.clone());
+                                            c.credential = CredentialRef::Id(nc.id);
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            cancel_cred = true;
+                                        }
+                                    });
+                                }));
+                                ui.end_row();
+                            }
                             ui.label("MAC (Wake-on-LAN)");
                             ui.add(egui::TextEdit::singleline(&mut c.mac).hint_text("00:11:22:33:44:55").desired_width(320.0));
                             ui.end_row();
@@ -347,6 +386,17 @@ impl App {
                 }
             });
             self.editor = Some(editor);
+            if cancel_cred {
+                self.new_cred = None;
+            }
+            if let Some(mut cred) = create_cred {
+                cred.name = cred.name.trim().to_string();
+                if self.result(self.store.save_credential(&cred)).is_some() {
+                    self.push(Level::Info, format!("Credentials “{}” created.", cred.name));
+                    self.data.credentials.push(cred);
+                    self.new_cred = None;
+                }
+            }
         }
     }
 

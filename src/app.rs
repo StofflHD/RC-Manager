@@ -474,6 +474,8 @@ pub struct App {
     cred_selected: Option<Uuid>,
     /// Working copy of the selected (or new) credentials in the credential manager.
     cred_edit: Option<Credential>,
+    /// Credentials being created in a connection's properties (for that connection's id).
+    new_cred: Option<(Uuid, Credential)>,
     /// `cred_edit` is a new set that is not stored yet.
     cred_new: bool,
     cred_filter: String,
@@ -662,6 +664,7 @@ impl App {
             show_credentials: false,
             cred_selected: None,
             cred_edit: None,
+            new_cred: None,
             cred_new: false,
             cred_filter: String::new(),
             cred_assign_filter: String::new(),
