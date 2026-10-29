@@ -878,12 +878,17 @@ pub fn is_credential_prompt(text: &str) -> bool {
 /// (its store is empty: RC Manager's certificate dialog and fingerprint store decide).
 /// FreeRDP also warns on every clipboard copy whose HTML or image format the other side cannot
 /// deliver or convert (plain text still transfers); that is a normal limitation, not an error.
+/// On Windows wfreerdp starts with six lines saying it is deprecated (RC Manager needs it: only
+/// it can draw into a tab) and a note that the build has no Azure AD logon.
 fn is_noise(line: &str) -> bool {
     line.contains("no RDP scancode found")
         || line.contains("[tls_print_new_certificate_warn]")
         || line.contains("BIO_new failed for certificate")
         || line.contains("[xf_cliprdr_server_format_data_response]")
         || line.contains("[clipboard_synthesize_")
+        || line.contains("[freerdp_warn_deprecated]")
+        || line.contains("[warn_contact_details]")
+        || line.contains("[nego_enable_aad]")
 }
 
 /// Splits a stream into lines and also reports an unfinished line that is a prompt.
@@ -1075,6 +1080,9 @@ mod tests {
         assert!(is_noise("[WARN][com.freerdp.client.x11] - [load_map_from_xkbfile]: MENU: keycode: 0x75 -> no RDP scancode found"));
         assert!(is_noise("[WARN][com.freerdp.client.x11.cliprdr] - [xf_cliprdr_server_format_data_response]: failed to get clipboard data in format text/html [source format HTML Format]"));
         assert!(is_noise("[WARN][com.winpr.clipboard.synthetic] - [clipboard_synthesize_image_ms_html]: Unsupported image format id 0x0000c005 [image/bmp]"));
+        assert!(is_noise("[WARN][com.freerdp.client.common.cmdline] - [freerdp_warn_deprecated]: As replacement there is a SDL3 based client available."));
+        assert!(is_noise("[WARN][com.freerdp.client.common.cmdline] - [warn_contact_details]: Be prepared to fix issues yourself though"));
+        assert!(is_noise("[WARN][com.freerdp.core.nego] - [nego_enable_aad]: This build does not support AAD security, disabling."));
         assert!(!is_noise(&format!("{pre}[tls_print_certificate_name_mismatch_error]: A valid certificate for the wrong name should NOT be trusted!")));
         assert!(!is_noise("Certificate details for 192.0.2.10:3389 (RDP-Server):"));
     }
