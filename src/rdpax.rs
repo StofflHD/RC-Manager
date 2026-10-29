@@ -96,7 +96,16 @@ mod imp {
         /// A property holding another interface (e.g. `AdvancedSettings9`).
         fn object(&self, name: &str) -> Result<Disp> {
             let v = self.get(name)?;
-            let unknown = IUnknown::try_from(&v).map_err(|e| anyhow!("{name}: {e}"))?;
+            // windows-core only converts VT_UNKNOWN; the control returns VT_DISPATCH. Both keep
+            // the interface pointer in the same place.
+            const VT_DISPATCH: u16 = 9;
+            const VT_UNKNOWN: u16 = 13;
+            let raw = v.as_raw();
+            let (vt, ptr) = unsafe { (raw.Anonymous.Anonymous.vt, raw.Anonymous.Anonymous.Anonymous.punkVal) };
+            if vt != VT_DISPATCH && vt != VT_UNKNOWN {
+                bail!("{name}: not an object (type {vt})");
+            }
+            let unknown = unsafe { IUnknown::from_raw_borrowed(&ptr) }.with_context(|| format!("{name} is empty"))?.clone();
             Ok(Disp(unknown.cast()?))
         }
 
