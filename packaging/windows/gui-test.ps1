@@ -21,6 +21,14 @@ public static class U {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+  // A low-level keyboard hook in this process, to see whether the runner calls such hooks.
+  public delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, HookProc f, IntPtr mod, uint thread);
+  [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
+  [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
+  static HookProc keep; public static int Seen;
+  public static bool Hook() { keep = (c, w, l) => { Seen++; return CallNextHookEx(IntPtr.Zero, c, w, l); };
+    return SetWindowsHookEx(13, keep, GetModuleHandle(null), 0) != IntPtr.Zero; }
   // Win+R as a keyboard would send it.
   public static void WinR() { keybd_event(0x5B, 0, 1, IntPtr.Zero); keybd_event(0x52, 0, 0, IntPtr.Zero);
     keybd_event(0x52, 0, 2, IntPtr.Zero); keybd_event(0x5B, 0, 3, IntPtr.Zero); }
@@ -139,7 +147,10 @@ Shot '1b-rdp-connecting'
 Start-Sleep -Seconds 90
 Shot '1b-rdp-session'
 [U]::Click(740, 420); Start-Sleep -Seconds 1
-[System.Windows.Forms.SendKeys]::SendWait('x'); Start-Sleep -Seconds 1
+$hooked = [U]::Hook()
+[System.Windows.Forms.SendKeys]::SendWait('x')
+for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+"Hook in the test process: installed $hooked, keys seen $([U]::Seen)" | Out-File -Append $info
 "Foreground before Win+R: $([U]::GetForegroundWindow()) (RC Manager $($p.MainWindowHandle))" | Out-File -Append $info
 [U]::WinR(); Start-Sleep -Seconds 4
 Shot '1c-win-r'
