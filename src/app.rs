@@ -1876,14 +1876,16 @@ impl App {
         }
         match focus_change {
             Some(Some((session, host))) => {
-                if let Some(ax) = self.ax_sessions.get(&session) {
-                    ax.activate();
-                }
                 emb.focus(emb.client_of(host));
+                // Key combinations go to a session of the Windows RDP control, if it wants them.
+                let remote = self.ax_sessions.contains_key(&session)
+                    && self.sessions.get(&session).is_some_and(|s| s.conn.options.rdp.shortcuts == RdpShortcuts::Remote);
+                emb.forward_keys(emb.client_of(host).filter(|_| remote));
                 self.session_focus = Some(session);
             }
             Some(None) => {
                 emb.focus(None);
+                emb.forward_keys(None);
                 self.session_focus = None;
             }
             None => {}

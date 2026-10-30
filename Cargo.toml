@@ -52,7 +52,7 @@ winresource = "0.1"
 eframe = { version = "=0.29.1", default-features = false, features = ["wgpu"] }
 # COM (IDispatch, VARIANT) for the Remote Desktop ActiveX control; the version eframe's wgpu
 # already uses.
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_System_Variant"] }
 # eframe enables no Direct3D backend by itself (also D3D12's software adapter WARP).
 wgpu = { version = "22.1", default-features = false, features = ["dx12"] }
 # Embedding of client windows (Win32 child windows), console for command-line output.
