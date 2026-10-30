@@ -132,7 +132,8 @@ Start-Sleep -Seconds 8
 [System.Windows.Forms.SendKeys]::SendWait('rckeys'); Start-Sleep -Milliseconds 300
 [U]::Click(600, 411); Start-Sleep -Milliseconds 300
 [System.Windows.Forms.SendKeys]::SendWait($pw); Start-Sleep -Milliseconds 300
-[U]::Click(432, 453)
+[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Seconds 2
+Shot '1b-rdp-connecting'
 # The first logon of a new user prepares its profile.
 Start-Sleep -Seconds 90
 Shot '1b-rdp-session'
