@@ -361,13 +361,48 @@ pub struct Folder {
     /// Credentials used by connections (and sub-folders) that inherit. `Inherit` takes them from
     /// the parent folder, so nested folders can share one set; `None` stops the inheritance here.
     pub credential: CredentialRef,
+    /// Settings profiles (at most one per protocol) for connections in this folder and its
+    /// sub-folders that inherit their settings.
+    #[serde(default)]
+    pub profiles: Vec<Uuid>,
 }
 
 impl Folder {
     pub fn new(name: &str, parent: Option<Uuid>) -> Self {
         let credential = if parent.is_some() { CredentialRef::Inherit } else { CredentialRef::None };
-        Self { id: Uuid::new_v4(), parent, name: name.into(), description: String::new(), sorting: 0, expanded: true, credential }
+        Self { id: Uuid::new_v4(), parent, name: name.into(), description: String::new(), sorting: 0, expanded: true, credential, profiles: Vec::new() }
     }
+}
+
+/// Named settings for the connections of one protocol – the original's group settings. A
+/// connection uses its own settings, a profile, or the profile its folder (or the nearest parent
+/// folder with one for its protocol) has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsProfile {
+    pub id: Uuid,
+    pub name: String,
+    pub protocol: Protocol,
+    pub options: ProtocolOptions,
+}
+
+impl SettingsProfile {
+    /// The protocols that have settings worth sharing.
+    pub const PROTOCOLS: [Protocol; 3] = [Protocol::Rdp, Protocol::Ssh, Protocol::Vnc];
+
+    pub fn new(name: &str, protocol: Protocol) -> Self {
+        Self { id: Uuid::new_v4(), name: name.into(), protocol, options: ProtocolOptions::default() }
+    }
+}
+
+/// Where a connection's protocol settings come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SettingsRef {
+    /// Its own `options`.
+    #[default]
+    Own,
+    /// The profile of its folder or the nearest parent folder (its own options without one).
+    Inherit,
+    Profile(Uuid),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -381,6 +416,9 @@ pub struct Connection {
     pub port: u16,
     pub description: String,
     pub credential: CredentialRef,
+    /// Where the protocol settings come from: `options`, a profile, or the folders.
+    #[serde(default)]
+    pub settings: SettingsRef,
     pub options: ProtocolOptions,
     pub mac: String,
     pub sorting: i64,
@@ -398,6 +436,7 @@ impl Connection {
             port: 0,
             description: String::new(),
             credential: if parent.is_some() { CredentialRef::Inherit } else { CredentialRef::None },
+            settings: if parent.is_some() { SettingsRef::Inherit } else { SettingsRef::Own },
             options: ProtocolOptions::default(),
             mac: String::new(),
             sorting: 0,

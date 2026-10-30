@@ -223,6 +223,30 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
         }
     }
 
+    // Group settings (and settings assigned to folders) become settings profiles.
+    let in_folders: HashSet<&String> = folder_settings.values().flatten().collect();
+    let mut profiles = Vec::new();
+    for r in &setting_rows {
+        let Some(id) = guid(get(r, "id")) else { continue };
+        let protocol = match setting_type.get(&id).map(String::as_str) {
+            Some(TYPE_RDP) => Protocol::Rdp,
+            Some(TYPE_PUTTY) => Protocol::Ssh,
+            Some(TYPE_VNC) => Protocol::Vnc,
+            _ => continue,
+        };
+        let (Ok(uuid), true) = (Uuid::parse_str(&id), truthy(r.get("isgroup")) || in_folders.contains(&id)) else { continue };
+        let name = get(r, "name").trim();
+        let mut c = Connection::new(if name.is_empty() { protocol.label() } else { name }, protocol, None);
+        if let Some(Ok(g)) = setting_blobs.get(&id).filter(|b| !b.is_empty()).map(|b| nrbf::parse(b)) {
+            if let Some(f) = g.root_fields() {
+                apply_settings(&mut c, &f, &mut 0, &mut warnings);
+                gateway_credentials(&mut c, &mut credentials);
+            }
+        }
+        profiles.push(SettingsProfile { id: uuid, name: c.name, protocol, options: c.options });
+    }
+    let profile_ids: HashSet<String> = profiles.iter().map(|p| p.id.to_string()).collect();
+
     // Inheritance like GuiManager.GetConnectionCredentials/-Settings: up the folder chain,
     // the first entry with a matching protocol type wins.
     let inherited = |start: &str, links: &HashMap<String, Vec<String>>, types: &HashMap<String, String>, ty: &str| -> Option<String> {
@@ -265,6 +289,13 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
                 sorting: get(r, "sorting").parse().unwrap_or(0),
                 expanded: truthy(r.get("expandet")),
                 credential: pick.and_then(|c| Uuid::parse_str(c).ok()).map(CredentialRef::Id).unwrap_or(CredentialRef::None),
+                profiles: folder_settings
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|s| profile_ids.contains(*s))
+                    .filter_map(|s| Uuid::parse_str(s).ok())
+                    .collect(),
             })
         })
         .collect();
@@ -347,10 +378,14 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
 
         // Settings
         let setting = guid(get(&r, "setting")).unwrap_or_default();
-        let setting = if setting.is_empty() || setting == SETTING_INHERIT || setting == Uuid::nil().to_string() {
-            inherited(&parent_raw, &folder_settings, &setting_type, &ty)
-        } else {
-            Some(setting)
+        let inherits = setting.is_empty() || setting == SETTING_INHERIT || setting == Uuid::nil().to_string();
+        let setting = if inherits { inherited(&parent_raw, &folder_settings, &setting_type, &ty) } else { Some(setting) };
+        // A profile is used as such; individual settings become the connection's own (which
+        // are also filled in from a profile, as a fallback).
+        conn.settings = match setting.as_ref().filter(|s| profile_ids.contains(*s)).and_then(|s| Uuid::parse_str(s).ok()) {
+            Some(_) if inherits => SettingsRef::Inherit,
+            Some(id) => SettingsRef::Profile(id),
+            None => SettingsRef::Own,
         };
         if let Some(blob) = setting.and_then(|s| setting_blobs.get(&s)).filter(|b| !b.is_empty()) {
             match nrbf::parse(blob) {
@@ -383,7 +418,7 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
         warnings.push(format!("{unknown_types} connection(s) of unknown type (plugins) skipped."));
     }
 
-    Ok(ImportResult { data: Data { folders: out_folders, connections, credentials }, warnings, skipped_deleted, backup: None })
+    Ok(ImportResult { data: Data { folders: out_folders, connections, credentials, profiles }, warnings, skipped_deleted, backup: None })
 }
 
 /// Splits a Windows command line: whitespace separates, double quotes group, backslashes
@@ -750,6 +785,13 @@ mod tests {
         assert!(dc.options.rdp.clipboard);
         assert_eq!(dc.credential, CredentialRef::Inherit);
         assert_eq!(dc.mac, "00:11:22:33:44:55");
+        // The group settings "RDP Gruppe" of folder "Kunde A" become a profile DC01 inherits.
+        let group = d.profiles.iter().find(|p| p.name == "RDP Gruppe").unwrap();
+        assert_eq!(group.protocol, Protocol::Rdp);
+        assert_eq!(group.options.rdp.resolution, "1920x1080");
+        assert_eq!(fa.profiles, vec![group.id]);
+        assert_eq!(dc.settings, SettingsRef::Inherit);
+        assert_eq!(d.profiles.len(), 1, "individual settings (\"ssh\") stay the connection's own");
 
         let ssh = d.connections.iter().find(|c| c.name == "Linux-Box").unwrap();
         assert_eq!(ssh.protocol, Protocol::Ssh);
@@ -758,6 +800,7 @@ mod tests {
         assert!(ssh.options.ssh.x11_forwarding);
         assert_eq!(ssh.options.ssh.extra_args, "");
         assert_eq!(ssh.credential, CredentialRef::Id(id("cccccccc-0000-0000-0000-000000000002")));
+        assert_eq!(ssh.settings, SettingsRef::Own);
 
         let web = d.connections.iter().find(|c| c.name == "Intranet").unwrap();
         assert_eq!(web.protocol, Protocol::Web);

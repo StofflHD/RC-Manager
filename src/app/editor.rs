@@ -263,6 +263,7 @@ impl App {
             };
             let mut create_cred: Option<Credential> = None;
             let mut cancel_cred = false;
+            let mut open_profile: Option<Uuid> = None;
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 match &mut editor {
                     Editor::Folder(f) => {
@@ -281,6 +282,13 @@ impl App {
                             let inherited = self.inherited_credential(f.parent);
                             Self::credential_combo(ui, "folder_cred", &mut f.credential, &self.data.credentials, f.parent.is_some(), inherited.as_ref());
                             ui.end_row();
+                            // Settings profiles for the connections inside, per protocol.
+                            for protocol in SettingsProfile::PROTOCOLS {
+                                ui.label(format!("{} settings", protocol.label()));
+                                let inherited = self.folder_profile(f.parent, protocol);
+                                Self::folder_profile_combo(ui, f, protocol, &self.data.profiles, inherited);
+                                ui.end_row();
+                            }
                             ui.label("Sort order");
                             ui.add(egui::DragValue::new(&mut f.sorting));
                             ui.end_row();
@@ -373,6 +381,12 @@ impl App {
                                 }));
                                 ui.end_row();
                             }
+                            if SettingsProfile::PROTOCOLS.contains(&c.protocol) {
+                                ui.label("Settings");
+                                let inherited = self.folder_profile(c.parent, c.protocol);
+                                Self::settings_combo(ui, c, &self.data.profiles, inherited);
+                                ui.end_row();
+                            }
                             ui.label("MAC (Wake-on-LAN)");
                             ui.add(egui::TextEdit::singleline(&mut c.mac).hint_text("00:11:22:33:44:55").desired_width(320.0));
                             ui.end_row();
@@ -381,11 +395,25 @@ impl App {
                             ui.end_row();
                         });
                         ui.add_space(8.0);
-                        Self::protocol_options(ui, c, &self.data.credentials);
+                        // Protocol settings: its own, or those of a settings profile.
+                        match self.settings_profile(c).map(|p| (p.id, p.name.clone())) {
+                            Some((id, name)) => {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("Uses the settings profile “{name}”.")).weak());
+                                    if ui.button("Edit profile …").clicked() {
+                                        open_profile = Some(id);
+                                    }
+                                });
+                            }
+                            None => Self::protocol_options(ui, c, &self.data.credentials),
+                        }
                     }
                 }
             });
             self.editor = Some(editor);
+            if let Some(id) = open_profile {
+                self.open_profile(Some(id));
+            }
             if cancel_cred {
                 self.new_cred = None;
             }

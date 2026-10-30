@@ -423,6 +423,7 @@ impl App {
         self.ui_prompt(ctx);
         self.ui_reopen(ctx);
         self.ui_credentials(ctx);
+        self.ui_profiles(ctx);
         self.ui_import(ctx);
         self.ui_rdp_import(ctx);
         self.ui_export(ctx);

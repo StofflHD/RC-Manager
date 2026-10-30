@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 mod dialogs;
 mod editor;
+mod profiles;
 mod tree;
 
 /// Full text of the GPL-3.0, shown in the About window (CR are dropped when shown: Windows
@@ -478,6 +479,11 @@ pub struct App {
     ctx: egui::Context,
 
     show_credentials: bool,
+    /// Settings profile manager: the selected profile and its unsaved form.
+    show_profiles: bool,
+    profile_selected: Option<Uuid>,
+    profile_edit: Option<SettingsProfile>,
+    profile_new: bool,
     cred_selected: Option<Uuid>,
     /// Working copy of the selected (or new) credentials in the credential manager.
     cred_edit: Option<Credential>,
@@ -671,6 +677,10 @@ impl App {
             events_rx,
             ctx: cc.egui_ctx.clone(),
             show_credentials: false,
+            show_profiles: false,
+            profile_selected: None,
+            profile_edit: None,
+            profile_new: false,
             cred_selected: None,
             cred_edit: None,
             new_cred: None,
@@ -763,6 +773,40 @@ impl App {
 
     fn folder(&self, id: Uuid) -> Option<&Folder> {
         self.data.folders.iter().find(|f| f.id == id)
+    }
+
+    fn profile(&self, id: Uuid) -> Option<&SettingsProfile> {
+        self.data.profiles.iter().find(|p| p.id == id)
+    }
+
+    /// The profile `folder` (or the nearest parent folder with one) has for `protocol`.
+    fn folder_profile(&self, mut folder: Option<Uuid>, protocol: Protocol) -> Option<&SettingsProfile> {
+        for _ in 0..256 {
+            let f = self.folder(folder?)?;
+            if let Some(p) = f.profiles.iter().filter_map(|id| self.profile(*id)).find(|p| p.protocol == protocol) {
+                return Some(p);
+            }
+            folder = f.parent;
+        }
+        None
+    }
+
+    /// The profile whose settings a connection uses; `None`: its own.
+    fn settings_profile(&self, conn: &Connection) -> Option<&SettingsProfile> {
+        match conn.settings {
+            SettingsRef::Own => None,
+            SettingsRef::Profile(id) => self.profile(id).filter(|p| p.protocol == conn.protocol),
+            SettingsRef::Inherit => self.folder_profile(conn.parent, conn.protocol),
+        }
+    }
+
+    /// The connection with the settings it uses.
+    fn with_settings(&self, conn: &Connection) -> Connection {
+        let mut c = conn.clone();
+        if let Some(p) = self.settings_profile(conn) {
+            c.options = p.options.clone();
+        }
+        c
     }
 
     fn connection(&self, id: Uuid) -> Option<&Connection> {
@@ -1194,6 +1238,9 @@ impl App {
     }
 
     fn launch(&mut self, conn: &Connection, cred: Option<&Credential>) {
+        // The settings of its profile, if it uses one.
+        let resolved = self.with_settings(conn);
+        let conn = &resolved;
         let embed = self.embed_target(conn);
         // Own gateway credentials go to the client only, not into the session's copy.
         let with_gateway = self.with_gateway_credential(conn);
