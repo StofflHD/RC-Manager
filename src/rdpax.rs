@@ -42,7 +42,7 @@ mod imp {
     use std::time::{Duration, Instant};
     use windows::core::{Interface, IUnknown, BSTR, GUID, HSTRING, PCWSTR, VARIANT};
     use windows::Win32::System::Com::{CLSIDFromProgID, StringFromGUID2, IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS};
-    use windows::Win32::System::Ole::{OleInitialize, DISPID_PROPERTYPUT};
+    use windows::Win32::System::Ole::{IOleObject, OleInitialize, DISPID_PROPERTYPUT, OLEIVERB_UIACTIVATE};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetClientRect, WS_CHILD, WS_CLIPCHILDREN, WS_VISIBLE};
@@ -274,6 +274,10 @@ mod imp {
                 // 0: play sounds on this computer, 1: on the remote computer, 2: do not play them.
                 s.put("AudioRedirectionMode", if o.sound { 0 } else if o.sound_remote { 1 } else { 2 }).ok();
                 s.put("KeyboardHookMode", o.shortcuts.hook_mode()).ok();
+                let mode = s.get("KeyboardHookMode").ok().and_then(|v| i32::try_from(&v).ok());
+                if mode != Some(o.shortcuts.hook_mode()) {
+                    self.note.set(Some(format!("the key combinations setting was not taken over (KeyboardHookMode {mode:?})")));
+                }
                 if o.remote_app.trim().is_empty() && !o.start_program.trim().is_empty() {
                     s.put("StartProgram", BSTR::from(o.start_program.trim())).ok();
                     s.put("WorkDir", BSTR::from(o.start_dir.trim())).ok();
@@ -376,6 +380,20 @@ mod imp {
             self.note.take()
         }
 
+        /// Activates the control the way a click does (OLE UI activation). Its keyboard hook,
+        /// which sends key combinations such as Alt+Tab to the session, only works then.
+        pub fn activate(&self) {
+            unsafe {
+                let Ok(ole) = self.client.0.cast::<IOleObject>() else { return };
+                let Ok(site) = ole.GetClientSite() else { return };
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetClientRect(self.window, &mut r);
+                let rect = windows::Win32::Foundation::RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+                let parent = windows::Win32::Foundation::HWND(self.window);
+                let _ = ole.DoVerb(OLEIVERB_UIACTIVATE.0, std::ptr::null(), &site, 0, parent, &rect);
+            }
+        }
+
         /// Ends the session (RC Manager closes the tab or exits).
         pub fn disconnect(&self) {
             if self.state.get() != 0 {
@@ -415,6 +433,7 @@ impl RdpAx {
     pub fn note(&self) -> Option<String> {
         None
     }
+    pub fn activate(&self) {}
     pub fn disconnect(&self) {}
 }
 

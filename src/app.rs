@@ -1876,6 +1876,9 @@ impl App {
         }
         match focus_change {
             Some(Some((session, host))) => {
+                if let Some(ax) = self.ax_sessions.get(&session) {
+                    ax.activate();
+                }
                 emb.focus(emb.client_of(host));
                 self.session_focus = Some(session);
             }
