@@ -273,11 +273,9 @@ mod imp {
             if let Ok(s) = c.newest(&["SecuredSettings3", "SecuredSettings2"]) {
                 // 0: play sounds on this computer, 1: on the remote computer, 2: do not play them.
                 s.put("AudioRedirectionMode", if o.sound { 0 } else if o.sound_remote { 1 } else { 2 }).ok();
-                s.put("KeyboardHookMode", o.shortcuts.hook_mode()).ok();
-                let mode = s.get("KeyboardHookMode").ok().and_then(|v| i32::try_from(&v).ok());
-                if mode != Some(o.shortcuts.hook_mode()) {
-                    self.note.set(Some(format!("the key combinations setting was not taken over (KeyboardHookMode {mode:?})")));
-                }
+                // RC Manager sends key combinations to the session itself (`Embedder::forward_keys`);
+                // the control's own keyboard hook would only get in the way.
+                s.put("KeyboardHookMode", 0).ok();
                 if o.remote_app.trim().is_empty() && !o.start_program.trim().is_empty() {
                     s.put("StartProgram", BSTR::from(o.start_program.trim())).ok();
                     s.put("WorkDir", BSTR::from(o.start_dir.trim())).ok();

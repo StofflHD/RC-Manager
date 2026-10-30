@@ -246,16 +246,6 @@ impl RdpShortcuts {
             RdpShortcuts::FullScreen => "Only in full screen",
         }
     }
-
-    /// The value of the control's `KeyboardHookMode`.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    pub fn hook_mode(self) -> i32 {
-        match self {
-            RdpShortcuts::Local => 0,
-            RdpShortcuts::Remote => 1,
-            RdpShortcuts::FullScreen => 2,
-        }
-    }
 }
 
 /// RD Gateway use, as in the original: not at all, detected automatically, or this server.
