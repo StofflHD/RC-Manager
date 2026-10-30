@@ -154,6 +154,7 @@ for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); 
 "Foreground before Win+R: $([U]::GetForegroundWindow()) (RC Manager $($p.MainWindowHandle))" | Out-File -Append $info
 [U]::WinR()
 for ($i = 0; $i -lt 80; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+"Hook in the test process after Win+R: keys seen $([U]::Seen)" | Out-File -Append $info
 Shot '1c-win-r'
 $local = [U]::FindWindow('#32770', 'Run')
 "Win+R in the RDP session: local Run dialog $(if ($local -ne [IntPtr]::Zero) { 'OPENED (key combination stayed local)' } else { 'not opened' })" |
