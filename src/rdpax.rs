@@ -266,7 +266,7 @@ mod imp {
                 .iter()
                 .filter(|(on, _)| *on)
                 .fold(0, |f, (_, bit)| f | bit);
-            a.put("PerformanceFlags", flags as i32).ok();
+            a.put("PerformanceFlags", flags).ok();
             a.put("BandwidthDetection", o.auto_detect).ok();
             a.put("BitmapPersistence", o.bitmap_caching as i32).ok();
             a.put("Compress", (!o.disable_compression) as i32).ok();
