@@ -115,8 +115,8 @@ Start-Sleep -Seconds 2
 # session, not on the runner's own desktop.
 $info = Join-Path $Out 'info.txt'
 $pw = 'Rc7' + [guid]::NewGuid().ToString('N').Substring(0, 16)
-net user rckeys $pw /add | Out-Null
-net localgroup 'Remote Desktop Users' rckeys /add | Out-Null
+net user rckeys $pw /add 2>&1 | Out-File -Append $info
+net localgroup 'Remote Desktop Users' rckeys /add 2>&1 | Out-File -Append $info
 python -c @"
 import json, sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
@@ -130,6 +130,8 @@ $p = Start-App @('--data-dir', $data, '--connect', 'DC01') 'app-keys'
 Start-Sleep -Seconds 8
 [U]::Click(600, 362); Start-Sleep -Milliseconds 300
 [System.Windows.Forms.SendKeys]::SendWait('rckeys'); Start-Sleep -Milliseconds 300
+[U]::Click(600, 386); Start-Sleep -Milliseconds 300
+[System.Windows.Forms.SendKeys]::SendWait($env:COMPUTERNAME); Start-Sleep -Milliseconds 300
 [U]::Click(600, 411); Start-Sleep -Milliseconds 300
 [System.Windows.Forms.SendKeys]::SendWait($pw); Start-Sleep -Milliseconds 300
 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Seconds 2
