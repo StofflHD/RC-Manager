@@ -406,7 +406,7 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     a.push(format!("/v:{}", conn.host.trim()));
     a.push(format!("/port:{}", conn.effective_port()));
     a.push(if v3 { format!("/title:{}", conn.name) } else { format!("/t:{}", conn.name) });
-    let mut secrets = Vec::new();
+    let mut secrets = vec![o.gateway_password.as_str()];
     if let Some(c) = cred {
         if !c.username.is_empty() {
             a.push(format!("/u:{}", c.username));
@@ -462,9 +462,34 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
         RdpGraphics::RemoteFx => a.push("/rfx".into()),
         RdpGraphics::Bitmap => {}
     }
+    // Experience, as in the original's display options.
+    for (on, flag) in [
+        (o.wallpaper, "wallpaper"),
+        (o.full_window_drag, "window-drag"),
+        (o.menu_animations, "menu-anims"),
+        (o.themes, "themes"),
+        (o.font_smoothing, "fonts"),
+    ] {
+        a.push(format!("{}{flag}", if on { '+' } else { '-' }));
+    }
+    if o.bitmap_caching && v3 {
+        a.push("/cache:persist".into());
+    }
+    if o.auto_detect {
+        a.push("/network:auto".into());
+    }
+    if o.disable_compression {
+        a.push("-compression".into());
+    }
+    // Key combinations go to the session unless they should stay local (in a window).
+    if v3 && (o.shortcuts == RdpShortcuts::Local || (o.shortcuts == RdpShortcuts::FullScreen && embed.is_some())) {
+        a.push("-grab-keyboard".into());
+    }
     a.push(if o.clipboard { "+clipboard" } else { "-clipboard" }.into());
     if o.sound {
         a.push("/sound".into());
+    } else if o.sound_remote {
+        a.push("/audio-mode:1".into());
     }
     if o.microphone {
         a.push("/microphone".into());
@@ -485,24 +510,33 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     if o.console {
         a.push("/admin".into());
     }
+    if o.disable_nla {
+        a.push("-sec-nla".into());
+    }
     // Without an option FreeRDP verifies the certificate against the system CAs and asks
     // (on stdin, shown as a dialog by RC Manager) when that fails – unknown, wrong name or
     // changed. "tofu" would refuse a changed certificate without asking.
     if o.ignore_certificate {
         a.push(if v3 { "/cert:ignore" } else { "/cert-ignore" }.into());
+    } else if o.refuse_unverified && v3 {
+        a.push("/cert:deny".into());
     } else if let Some(fp) = cert_fingerprint.filter(|fp| v3 && fp.len() == 64 && fp.chars().all(|c| c.is_ascii_hexdigit())) {
         // RC Manager keeps trusted certificates itself (FreeRDP 3.32's own store proved
         // unreliable); a changed certificate does not match and is asked about again.
         a.push(format!("/cert:fingerprint:sha256:{}", fp.to_ascii_lowercase()));
     }
-    if !o.gateway.trim().is_empty() {
+    // FreeRDP cannot detect a gateway by itself; "automatic" connects directly.
+    if let Some(server) = o.gateway_server() {
         // Gateway logon: its own credentials or those of the connection
         let (gu, gd, gp) = match cred {
             Some(c) if o.gateway_user.is_empty() => (c.username.clone(), c.domain.clone(), c.password.clone()),
-            _ => (o.gateway_user.clone(), o.gateway_domain.clone(), String::new()),
+            _ => (o.gateway_user.clone(), o.gateway_domain.clone(), o.gateway_password.clone()),
         };
         if v3 {
-            let mut g = format!("/gateway:g:{}", o.gateway.trim());
+            let mut g = format!("/gateway:g:{server}");
+            if o.gateway_bypass_local {
+                g += ",usage-method:detect";
+            }
             if !gu.is_empty() {
                 g += &format!(",u:{gu}");
             }
@@ -514,7 +548,7 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
             }
             a.push(g);
         } else {
-            a.push(format!("/g:{}", o.gateway.trim()));
+            a.push(format!("/g:{server}"));
             if !gu.is_empty() {
                 a.push(format!("/gu:{gu}"));
             }
@@ -531,6 +565,11 @@ fn plan_rdp(conn: &Connection, cred: Option<&Credential>, tools: &Tools, embed: 
     }
     if !o.remote_app.trim().is_empty() {
         a.push(if v3 { format!("/app:program:{}", o.remote_app.trim()) } else { format!("/app:{}", o.remote_app.trim()) });
+    } else if !o.start_program.trim().is_empty() {
+        a.push(format!("/shell:{}", o.start_program.trim()));
+        if !o.start_dir.trim().is_empty() {
+            a.push(format!("/shell-dir:{}", o.start_dir.trim()));
+        }
     }
     a.extend(split_extra(&o.extra_args)?);
 
@@ -1262,6 +1301,40 @@ mod tests {
         let events: Vec<Event> = rx.try_iter().collect();
         assert!(matches!(&events[0], Event::Output { line, .. } if line == "Certificate details for 127.0.0.1:3389:"));
         assert!(matches!(&events[2], Event::Prompt { session: 7, text } if text.ends_with("(Y/T/N)")));
+    }
+
+    #[test]
+    fn rdp_experience_gateway_and_start_program() {
+        let mut c = Connection::new("Srv", Protocol::Rdp, None);
+        c.host = "h".into();
+        let o = &mut c.options.rdp;
+        o.wallpaper = false;
+        o.font_smoothing = true;
+        o.disable_compression = true;
+        o.disable_nla = true;
+        o.refuse_unverified = true;
+        o.sound = false;
+        o.sound_remote = true;
+        o.shortcuts = RdpShortcuts::Local;
+        o.gateway = "gw.example".into();
+        o.gateway_bypass_local = true;
+        o.gateway_user = "gwuser".into();
+        o.gateway_password = "gw-secret".into();
+        o.start_program = "C:\\Tools\\app.exe".into();
+        o.start_dir = "C:\\Tools".into();
+        let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
+        let args = p.env.iter().find(|(k, _)| k == "RC_MANAGER_FREERDP_ARGS").unwrap().1.clone();
+        for want in ["-wallpaper", "+fonts", "-window-drag", "/network:auto", "-compression", "-sec-nla", "/cert:deny", "/audio-mode:1", "-grab-keyboard"] {
+            assert!(args.lines().any(|l| l == want), "{want} missing");
+        }
+        assert!(args.lines().any(|l| l == "/gateway:g:gw.example,usage-method:detect,u:gwuser,p:gw-secret"));
+        assert!(args.lines().any(|l| l == "/shell:C:\\Tools\\app.exe"));
+        assert!(args.lines().any(|l| l == "/shell-dir:C:\\Tools"));
+        assert!(!p.display.contains("gw-secret"), "the gateway password is not shown");
+        // "Do not use" keeps the server but connects directly.
+        c.options.rdp.gateway_mode = Some(GatewayMode::Off);
+        let p = plan(&c, Some(&cred()), &tools(3), None, None).unwrap();
+        assert!(!p.env.iter().any(|(_, v)| v.contains("/gateway")));
     }
 
     #[test]

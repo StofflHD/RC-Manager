@@ -792,6 +792,17 @@ impl App {
             .map(|t| t.session)
     }
 
+    /// The connection with its own RD Gateway credentials filled in, if it has some.
+    fn with_gateway_credential(&self, conn: &Connection) -> Option<Connection> {
+        let g = self.credential(conn.options.rdp.gateway_credential?)?;
+        let mut c = conn.clone();
+        let o = &mut c.options.rdp;
+        o.gateway_user = g.username.clone();
+        o.gateway_domain = g.domain.clone();
+        o.gateway_password = g.password.clone();
+        Some(c)
+    }
+
     /// Resolves credentials; `Inherit` walks up the folder tree.
     fn resolve_credential(&self, conn: &Connection) -> Option<Credential> {
         match conn.credential {
@@ -1181,12 +1192,15 @@ impl App {
 
     fn launch(&mut self, conn: &Connection, cred: Option<&Credential>) {
         let embed = self.embed_target(conn);
+        // Own gateway credentials go to the client only, not into the session's copy.
+        let with_gateway = self.with_gateway_credential(conn);
+        let client_conn = with_gateway.as_ref().unwrap_or(conn);
         // Windows: RDP in a tab with the ActiveX control; FreeRDP if it is off or not available.
         if let Some(t) = embed.as_ref().filter(|_| cfg!(windows) && self.s.rdp_activex && conn.protocol == Protocol::Rdp) {
             if !conn.options.rdp.remote_app.trim().is_empty() {
                 self.push(Level::Info, format!("{}: RemoteApp runs with FreeRDP.", conn.name));
             } else {
-                match crate::rdpax::RdpAx::connect(t.host, t.width, t.height, conn, cred) {
+                match crate::rdpax::RdpAx::connect(t.host, t.width, t.height, client_conn, cred) {
                     Ok(ax) => {
                         if !conn.options.rdp.extra_args.trim().is_empty() {
                             self.push(Level::Warn, format!("{}: the extra FreeRDP arguments are ignored by the Windows RDP client.", conn.name));
@@ -1204,7 +1218,7 @@ impl App {
         } else {
             None
         };
-        let plan = match launch::plan(conn, cred, &self.tools, embed.as_ref(), fingerprint.as_deref()) {
+        let plan = match launch::plan(client_conn, cred, &self.tools, embed.as_ref(), fingerprint.as_deref()) {
             Ok(p) => p,
             Err(e) => {
                 if let (Some(emb), Some(t)) = (&self.embedder, &embed) {

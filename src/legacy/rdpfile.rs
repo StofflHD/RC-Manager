@@ -68,14 +68,45 @@ pub fn parse(name: &str, content: &[u8], parent: Option<Uuid>) -> Result<RdpFile
             "redirectclipboard" => o.clipboard = flag,
             "redirectprinters" => o.printers = flag,
             "redirectsmartcards" => o.smartcards = flag,
-            "audiomode" => o.sound = val == "0",
+            "audiomode" => {
+                o.sound = val == "0";
+                o.sound_remote = val == "1";
+            }
+            "keyboardhook" => {
+                o.shortcuts = match val {
+                    "0" => RdpShortcuts::Local,
+                    "1" => RdpShortcuts::Remote,
+                    _ => RdpShortcuts::FullScreen,
+                }
+            }
+            "redirectcomports" => o.redirect_ports = flag,
+            "devicestoredirect" => o.redirect_pnp = !val.is_empty(),
+            "enablecredsspsupport" => o.disable_nla = val == "0",
+            "disable wallpaper" => o.wallpaper = !flag,
+            "disable full window drag" => o.full_window_drag = !flag,
+            "disable menu anims" => o.menu_animations = !flag,
+            "disable themes" => o.themes = !flag,
+            "allow font smoothing" => o.font_smoothing = flag,
+            "bitmapcachepersistenable" => o.bitmap_caching = flag,
+            "networkautodetect" => o.auto_detect = flag,
+            "compression" => o.disable_compression = !flag,
+            "gatewayusagemethod" => {
+                o.gateway_mode = Some(match val {
+                    "1" | "2" => GatewayMode::Manual,
+                    "3" => GatewayMode::Auto,
+                    _ => GatewayMode::Off,
+                });
+                o.gateway_bypass_local = val == "2";
+            }
             "audiocapturemode" => o.microphone = flag,
             "drivestoredirect" => o.home_drive = !val.is_empty(),
             "administrative session" | "connect to console" => o.console = flag,
             "gatewayhostname" => o.gateway = val.to_string(),
             "remoteapplicationprogram" => o.remote_app = val.to_string(),
-            "alternate shell" if o.remote_app.is_empty() => o.remote_app = val.to_string(),
+            "alternate shell" => o.start_program = val.to_string(),
+            "shell working directory" => o.start_dir = val.to_string(),
             // A file from elsewhere must not silently switch off server authentication.
+            "authentication level" if val == "1" => o.refuse_unverified = true,
             "authentication level" if val == "0" => {
                 warnings.push(format!("{name}: the file disables certificate checks; not applied (enable it in the connection if really needed)"))
             }
@@ -100,6 +131,22 @@ pub fn parse_file(path: &Path, parent: Option<Uuid>) -> Result<RdpFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_program_and_local_resources() {
+        let text = "full address:s:srv\r\nalternate shell:s:notepad.exe\r\nshell working directory:s:C:\\Temp\r\naudiomode:i:1\r\n\
+                    keyboardhook:i:0\r\nredirectcomports:i:1\r\ndisable wallpaper:i:1\r\ngatewayusagemethod:i:2\r\ngatewayhostname:s:gw\r\n";
+        let r = parse("srv", text.as_bytes(), None).unwrap();
+        let o = &r.connection.options.rdp;
+        assert_eq!(o.start_program, "notepad.exe");
+        assert_eq!(o.start_dir, "C:\\Temp");
+        assert_eq!(o.remote_app, "", "an alternate shell is no RemoteApp");
+        assert!(!o.sound && o.sound_remote);
+        assert_eq!(o.shortcuts, RdpShortcuts::Local);
+        assert!(o.redirect_ports && !o.wallpaper);
+        assert_eq!(o.gateway_server(), Some("gw"));
+        assert!(o.gateway_bypass_local);
+    }
 
     #[test]
     fn utf16_rdp_file() {

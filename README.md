@@ -20,6 +20,7 @@ then keeps the active sessions and a counter of new warnings visible.
 | Folder tree, search, sort order | ✔ | ✔ |
 | Sessions as tabs, scaled with the window | ✔ | ✔ (Linux: X11/XWayland) |
 | RDP | embedded MSTSC ActiveX | Linux: FreeRDP 3 drawn into the tab; Windows: the MSTSC ActiveX control (FreeRDP optional); remote resolution follows the tab or the desktop is scaled |
+| RDP options | display, experience, sound, key combinations, redirections, NLA, server authentication, TS gateway, start program, keyboard layout | the same (ports and Plug and Play devices only with the Windows RDP client); RemoteApp in addition |
 | Unlock a locked RDP session | ✔ (send password) | ✔ (*Unlock* types the stored password, no reconnect) |
 | SSH | embedded PuTTY | Linux: `ssh` in an xterm inside the tab, password via `sshpass`; Windows: PuTTY inside the tab |
 | VNC | UltraVNC/TightVNC | TigerVNC `vncviewer`, its window moved into the tab |
@@ -213,8 +214,11 @@ rc-manager --import ~/RDP_Manager_2026.04.22.zip [--app-password SECRET]
 ```
 
 Imported are folders, connections (RDP, PuTTY → SSH, VNC, web, external programs),
-credentials including passwords, as well as port, resolution, colour depth, redirections and
-gateway from the settings – also when they are inherited from folders. Deleted entries (recycle
+credentials including passwords, as well as the RDP settings (port, resolution, colour depth,
+experience, sound, key combinations, redirections, NLA, gateway, start program) – also when they
+are inherited from folders. Own gateway credentials become a credential set. Server
+authentication is taken over only as "warn" or "do not connect", never as "connect without
+warning". Deleted entries (recycle
 bin) are skipped. From a backup the import dialog shows version, date and comment, and the
 layout of the connection tree (auto-hide or docked) is taken over for the sidebar. Backups of
 installations that used a database server instead of SQLite cannot be imported.

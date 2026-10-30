@@ -381,7 +381,7 @@ impl App {
                             ui.end_row();
                         });
                         ui.add_space(8.0);
-                        Self::protocol_options(ui, c);
+                        Self::protocol_options(ui, c, &self.data.credentials);
                     }
                 }
             });
@@ -400,7 +400,7 @@ impl App {
         }
     }
 
-    pub(super) fn protocol_options(ui: &mut egui::Ui, c: &mut Connection) {
+    pub(super) fn protocol_options(ui: &mut egui::Ui, c: &mut Connection, creds: &[Credential]) {
         match c.protocol {
             Protocol::Rdp => {
                 let o = &mut c.options.rdp;
@@ -437,37 +437,143 @@ impl App {
                     ui.checkbox(&mut o.dynamic_resolution, "Adapt the remote resolution to the window size")
                         .on_hover_text("Needs server support (Windows 8.1 / Server 2012 R2 or newer). When off, the desktop is scaled to the window.");
                 });
+                ui.collapsing("Experience", |ui| {
+                    ui.checkbox(&mut o.wallpaper, "Desktop background");
+                    ui.checkbox(&mut o.full_window_drag, "Show contents of windows while dragging");
+                    ui.checkbox(&mut o.menu_animations, "Menu and window animation");
+                    ui.checkbox(&mut o.themes, "Themes");
+                    ui.checkbox(&mut o.font_smoothing, "Font smoothing");
+                    ui.checkbox(&mut o.bitmap_caching, "Persistent bitmap caching");
+                    ui.checkbox(&mut o.auto_detect, "Detect connection quality automatically")
+                        .on_hover_text("Client and server adapt the transfer to the connection; this may switch off some of the options above.");
+                    ui.checkbox(&mut o.disable_compression, "Disable compression");
+                });
                 ui.collapsing("Local Resources", |ui| {
+                    egui::Grid::new("rdp_res").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                        ui.label("Sound");
+                        let sound = |local: bool, remote: bool| match (local, remote) {
+                            (true, _) => "On this computer",
+                            (false, true) => "On the remote computer",
+                            (false, false) => "Do not play",
+                        };
+                        egui::ComboBox::from_id_salt("rdp_sound").selected_text(sound(o.sound, o.sound_remote)).show_ui(ui, |ui| {
+                            for (local, remote) in [(true, false), (false, true), (false, false)] {
+                                if ui.selectable_label(sound(o.sound, o.sound_remote) == sound(local, remote), sound(local, remote)).clicked() {
+                                    o.sound = local;
+                                    o.sound_remote = remote;
+                                }
+                            }
+                        });
+                        ui.end_row();
+                        ui.label("Key combinations");
+                        egui::ComboBox::from_id_salt("rdp_keys")
+                            .selected_text(o.shortcuts.label())
+                            .show_ui(ui, |ui| {
+                                for k in RdpShortcuts::ALL {
+                                    ui.selectable_value(&mut o.shortcuts, k, k.label());
+                                }
+                            })
+                            .response
+                            .on_hover_text("Where Windows key combinations such as Alt+Tab apply.");
+                        ui.end_row();
+                    });
                     ui.checkbox(&mut o.clipboard, "Clipboard");
-                    ui.checkbox(&mut o.sound, "Play audio locally");
-                    ui.checkbox(&mut o.microphone, "Microphone");
+                    ui.checkbox(&mut o.microphone, "Remote audio recording (microphone)");
                     ui.checkbox(&mut o.printers, "Printers");
                     ui.checkbox(&mut o.smartcards, "Smart cards");
-                    ui.checkbox(&mut o.home_drive, "Share home folder as drive “home”");
+                    ui.checkbox(&mut o.redirect_ports, "Ports (COM, LPT)").on_hover_text("Windows RDP client only.");
+                    ui.checkbox(&mut o.redirect_pnp, "Plug and Play devices").on_hover_text("Windows RDP client only.");
+                    ui.checkbox(&mut o.home_drive, "Share home folder as drive \u{201c}home\u{201d}");
                     ui.label("Additional drives (one per line, name=/path):");
                     let mut drives = o.drives.join("\n");
                     if ui.add(egui::TextEdit::multiline(&mut drives).desired_rows(2).desired_width(320.0)).changed() {
                         o.drives = drives.lines().map(|l| l.to_string()).collect();
                     }
                 });
+                ui.collapsing("RD Gateway", |ui| {
+                    let mut mode = o.gateway_mode();
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut mode, GatewayMode::Auto, "Detect automatically");
+                        ui.radio_value(&mut mode, GatewayMode::Off, "Do not use");
+                        ui.radio_value(&mut mode, GatewayMode::Manual, "Use these settings");
+                    });
+                    if mode != o.gateway_mode() {
+                        o.gateway_mode = Some(mode);
+                    }
+                    if mode == GatewayMode::Auto {
+                        ui.small("The Windows RDP client finds the gateway itself; FreeRDP connects directly.");
+                    }
+                    if mode != GatewayMode::Off {
+                        egui::Grid::new("rdp_gw").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                            if mode == GatewayMode::Manual {
+                                ui.label("Server");
+                                ui.add(egui::TextEdit::singleline(&mut o.gateway).desired_width(240.0));
+                                ui.end_row();
+                            }
+                            ui.label("");
+                            ui.checkbox(&mut o.gateway_bypass_local, "Bypass for local addresses");
+                            ui.end_row();
+                            ui.label("Credentials");
+                            let text = o
+                                .gateway_credential
+                                .map(|id| creds.iter().find(|c| c.id == id).map(|c| c.display()).unwrap_or_else(|| "(deleted)".into()))
+                                .unwrap_or_else(|| "Same as the connection".into());
+                            egui::ComboBox::from_id_salt("rdp_gw_cred").selected_text(text).width(240.0).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut o.gateway_credential, None, "Same as the connection");
+                                let mut sorted: Vec<&Credential> = creds.iter().collect();
+                                sorted.sort_by_key(|c| c.name.to_lowercase());
+                                for c in sorted {
+                                    ui.selectable_value(&mut o.gateway_credential, Some(c.id), c.display());
+                                }
+                            });
+                            ui.end_row();
+                            // Older connections may name a gateway user without stored credentials.
+                            if o.gateway_credential.is_none() && !(o.gateway_user.is_empty() && o.gateway_domain.is_empty()) {
+                                ui.label("Gateway user");
+                                ui.add(egui::TextEdit::singleline(&mut o.gateway_user).desired_width(240.0));
+                                ui.end_row();
+                                ui.label("Gateway domain");
+                                ui.add(egui::TextEdit::singleline(&mut o.gateway_domain).desired_width(240.0));
+                                ui.end_row();
+                            }
+                        });
+                    }
+                });
                 ui.collapsing("Advanced", |ui| {
                     ui.checkbox(&mut o.console, "Admin / console session");
-                    ui.checkbox(&mut o.ignore_certificate, "Do not verify certificate (insecure)");
+                    ui.checkbox(&mut o.disable_nla, "Do not use Network Level Authentication (NLA)");
                     egui::Grid::new("rdp_adv").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-                        ui.label("RD Gateway");
-                        ui.add(egui::TextEdit::singleline(&mut o.gateway).desired_width(240.0));
-                        ui.end_row();
-                        ui.label("Gateway user");
-                        ui.add(egui::TextEdit::singleline(&mut o.gateway_user).hint_text("empty = same as connection").desired_width(240.0));
-                        ui.end_row();
-                        ui.label("Gateway domain");
-                        ui.add(egui::TextEdit::singleline(&mut o.gateway_domain).desired_width(240.0));
+                        ui.label("Server authentication");
+                        let auth = |ignore: bool, refuse: bool| match (ignore, refuse) {
+                            (true, _) => "Connect without warning (insecure)",
+                            (false, true) => "Do not connect",
+                            (false, false) => "Warn",
+                        };
+                        egui::ComboBox::from_id_salt("rdp_auth")
+                            .selected_text(auth(o.ignore_certificate, o.refuse_unverified))
+                            .width(240.0)
+                            .show_ui(ui, |ui| {
+                                for (ignore, refuse) in [(false, false), (false, true), (true, false)] {
+                                    if ui.selectable_label(auth(o.ignore_certificate, o.refuse_unverified) == auth(ignore, refuse), auth(ignore, refuse)).clicked() {
+                                        o.ignore_certificate = ignore;
+                                        o.refuse_unverified = refuse;
+                                    }
+                                }
+                            })
+                            .response
+                            .on_hover_text("What happens when the server's certificate cannot be verified.");
                         ui.end_row();
                         ui.label("Keyboard layout");
                         ui.add(egui::TextEdit::singleline(&mut o.keyboard_layout).hint_text("e.g. 00000409").desired_width(240.0));
                         ui.end_row();
-                        ui.label("RemoteApp / program");
-                        ui.add(egui::TextEdit::singleline(&mut o.remote_app).desired_width(240.0));
+                        ui.label("Start program");
+                        ui.add(egui::TextEdit::singleline(&mut o.start_program).hint_text("instead of the desktop").desired_width(240.0));
+                        ui.end_row();
+                        ui.label("Start in folder");
+                        ui.add(egui::TextEdit::singleline(&mut o.start_dir).desired_width(240.0));
+                        ui.end_row();
+                        ui.label("RemoteApp");
+                        ui.add(egui::TextEdit::singleline(&mut o.remote_app).hint_text("published program (runs with FreeRDP)").desired_width(240.0));
                         ui.end_row();
                         ui.label("Extra arguments");
                         ui.add(egui::TextEdit::singleline(&mut o.extra_args).hint_text("FreeRDP options").desired_width(240.0));
