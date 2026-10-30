@@ -127,7 +127,10 @@ next to `rc-manager.exe`:
 
 Sessions open as tabs like on Linux. RDP tabs use the Remote Desktop client built into Windows –
 the ActiveX control of mstsc.exe, as in the original – hosted in RC Manager's window: it draws
-with the GPU and shows its own certificate and logon dialogs. *Options → Windows RDP Client in
+with the GPU and shows its own certificate and logon dialogs. With *Key combinations: On the
+remote computer* (default) the Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+Space go to the
+session while it has the keyboard; RC Manager forwards them itself, since the control's own
+keyboard hook does not work when it is embedded. *Options → Windows RDP Client in
 Tabs* switches to FreeRDP (`wfreerdp`) instead, which is also used for RemoteApp and when the
 control is not available. PuTTY's and TigerVNC's windows are moved into the tab (their title bar
 and frame lie outside the tab, as in the original). The installed version stores its data in

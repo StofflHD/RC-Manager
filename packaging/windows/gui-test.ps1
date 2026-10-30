@@ -18,26 +18,6 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
-  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
-  // A low-level keyboard hook in this process, to see whether the runner calls such hooks.
-  public delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
-  [DllImport("user32.dll")] static extern IntPtr SetWindowsHookEx(int id, HookProc f, IntPtr mod, uint thread);
-  [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h, int code, IntPtr w, IntPtr l);
-  [DllImport("kernel32.dll")] static extern IntPtr GetModuleHandle(string name);
-  static HookProc keep; public static int Seen;
-  public static bool Hook() { keep = (c, w, l) => { Seen++; return CallNextHookEx(IntPtr.Zero, c, w, l); };
-    return SetWindowsHookEx(13, keep, GetModuleHandle(null), 0) != IntPtr.Zero; }
-  // Win+R as a keyboard would send it.
-  [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public IntPtr extra; }
-  [StructLayout(LayoutKind.Explicit, Size = 40)] struct INPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KEYBDINPUT k; }
-  [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
-  static INPUT Key(ushort vk, ushort scan, uint flags) { var i = new INPUT(); i.type = 1; i.k.vk = vk; i.k.scan = scan; i.k.flags = flags; return i; }
-  public static uint WinR() {
-    var keys = new[] { Key(0x5B, 0x5B, 1), Key(0x52, 0x13, 0), Key(0x52, 0x13, 2), Key(0x5B, 0x5B, 3) };
-    return SendInput((uint)keys.Length, keys, Marshal.SizeOf(typeof(INPUT)));
-  }
   [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtrW(IntPtr h, int i);
   public static long GetStyle(IntPtr h) { return (long)GetWindowLongPtrW(h, -16); }
   public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, IntPtr.Zero); mouse_event(4, 0, 0, 0, IntPtr.Zero); }
@@ -125,9 +105,9 @@ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 Get-Process wfreerdp -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 
-# 1b: key combinations in a session of the Windows RDP control. A test user logs on to the
-# runner; with "Key combinations: on the remote computer" Win+R has to open "Run" inside the
-# session, not on the runner's own desktop.
+# 1b: a session of the Windows RDP control: a test user logs on to the runner. (Key
+# combinations cannot be checked here: injected keys reach no low-level keyboard hook on the
+# runner.)
 $info = Join-Path $Out 'info.txt'
 $pw = 'Rc7' + [guid]::NewGuid().ToString('N').Substring(0, 16)
 New-LocalUser -Name rckeys -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -PasswordNeverExpires 2>&1 | Out-File -Append $info
@@ -152,20 +132,6 @@ Shot '1b-rdp-connecting'
 # The first logon of a new user prepares its profile.
 Start-Sleep -Seconds 90
 Shot '1b-rdp-session'
-[U]::Click(740, 420); Start-Sleep -Seconds 1
-$hooked = [U]::Hook()
-[System.Windows.Forms.SendKeys]::SendWait('x')
-for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
-"Hook in the test process: installed $hooked, keys seen $([U]::Seen)" | Out-File -Append $info
-"Foreground before Win+R: $([U]::GetForegroundWindow()) (RC Manager $($p.MainWindowHandle))" | Out-File -Append $info
-"SendInput Win+R: $([U]::WinR()) events" | Out-File -Append $info
-for ($i = 0; $i -lt 80; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
-"Hook in the test process after Win+R: keys seen $([U]::Seen)" | Out-File -Append $info
-Shot '1c-win-r'
-$local = [U]::FindWindow('#32770', 'Run')
-"Win+R in the RDP session: local Run dialog $(if ($local -ne [IntPtr]::Zero) { 'OPENED (key combination stayed local)' } else { 'not opened' })" |
-    Out-File -Append $info
-if ($local -ne [IntPtr]::Zero) { [U]::PostMessage($local, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
