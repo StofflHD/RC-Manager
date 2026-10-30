@@ -428,6 +428,7 @@ mod imp {
     unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
         let control = KEY_TARGET.load(Ordering::Relaxed) as HWND;
         let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
+        eprintln!("DEBUG hook code={code} control={control:?} main={main:?} fg={:?}", GetForegroundWindow());
         if code == HC_ACTION as i32 && !control.is_null() && GetForegroundWindow() == main {
             // The window inside the control that has the keyboard (its input window).
             let thread = GetWindowThreadProcessId(main, std::ptr::null_mut());
@@ -766,6 +767,10 @@ mod imp {
                                     UnhookWindowsHookEx(hook);
                                 }
                                 hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0);
+                                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                                if N.fetch_add(1, Ordering::Relaxed) % 20 == 0 {
+                                    eprintln!("DEBUG hook renewed: {:?}", hook);
+                                }
                             }
                             DispatchMessageW(&msg);
                         }

@@ -18,6 +18,7 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
   // Win+R as a keyboard would send it.
@@ -138,6 +139,8 @@ Shot '1b-rdp-connecting'
 Start-Sleep -Seconds 90
 Shot '1b-rdp-session'
 [U]::Click(740, 420); Start-Sleep -Seconds 1
+[System.Windows.Forms.SendKeys]::SendWait('x'); Start-Sleep -Seconds 1
+"Foreground before Win+R: $([U]::GetForegroundWindow()) (RC Manager $($p.MainWindowHandle))" | Out-File -Append $info
 [U]::WinR(); Start-Sleep -Seconds 4
 Shot '1c-win-r'
 $local = [U]::FindWindow('#32770', 'Run')
