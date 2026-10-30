@@ -768,7 +768,7 @@ mod imp {
                                 }
                                 hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0);
                                 static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                                if N.fetch_add(1, Ordering::Relaxed) % 20 == 0 {
+                                if N.fetch_add(1, Ordering::Relaxed).is_multiple_of(20) {
                                     eprintln!("DEBUG hook renewed: {:?}", hook);
                                 }
                             }
