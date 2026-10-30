@@ -18,6 +18,11 @@ public static class U {
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);
+  // Win+R as a keyboard would send it.
+  public static void WinR() { keybd_event(0x5B, 0, 1, IntPtr.Zero); keybd_event(0x52, 0, 0, IntPtr.Zero);
+    keybd_event(0x52, 0, 2, IntPtr.Zero); keybd_event(0x5B, 0, 3, IntPtr.Zero); }
   [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtrW(IntPtr h, int i);
   public static long GetStyle(IntPtr h) { return (long)GetWindowLongPtrW(h, -16); }
   public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, IntPtr.Zero); mouse_event(4, 0, 0, 0, IntPtr.Zero); }
@@ -103,6 +108,42 @@ Get-Process | Where-Object { $_.ProcessName -match 'wfreerdp|putty|vncviewer|rc-
 Start-Sleep -Seconds 3
 Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 Get-Process wfreerdp -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2
+
+# 1b: key combinations in a session of the Windows RDP control. A test user logs on to the
+# runner; with "Key combinations: on the remote computer" Win+R has to open "Run" inside the
+# session, not on the runner's own desktop.
+$info = Join-Path $Out 'info.txt'
+$pw = 'Rc7' + [guid]::NewGuid().ToString('N').Substring(0, 16)
+net user rckeys $pw /add | Out-Null
+net localgroup 'Remote Desktop Users' rckeys /add | Out-Null
+python -c @"
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+for i, o in db.execute("SELECT id, options FROM connections WHERE name = 'DC01'").fetchall():
+    o = json.loads(o)
+    o.setdefault('rdp', {}).update(ignore_certificate=True, shortcuts='Remote')
+    db.execute('UPDATE connections SET options = ? WHERE id = ?', (json.dumps(o), i))
+db.commit()
+"@ (Join-Path $data 'rc-manager.db3')
+$p = Start-App @('--data-dir', $data, '--connect', 'DC01') 'app-keys'
+Start-Sleep -Seconds 8
+[U]::Click(600, 362); Start-Sleep -Milliseconds 300
+[System.Windows.Forms.SendKeys]::SendWait('rckeys'); Start-Sleep -Milliseconds 300
+[U]::Click(600, 411); Start-Sleep -Milliseconds 300
+[System.Windows.Forms.SendKeys]::SendWait($pw); Start-Sleep -Milliseconds 300
+[U]::Click(432, 453)
+# The first logon of a new user prepares its profile.
+Start-Sleep -Seconds 90
+Shot '1b-rdp-session'
+[U]::Click(740, 420); Start-Sleep -Seconds 1
+[U]::WinR(); Start-Sleep -Seconds 4
+Shot '1c-win-r'
+$local = [U]::FindWindow('#32770', 'Run')
+"Win+R in the RDP session: local Run dialog $(if ($local -ne [IntPtr]::Zero) { 'OPENED (key combination stayed local)' } else { 'not opened' })" |
+    Out-File -Append $info
+if ($local -ne [IntPtr]::Zero) { [U]::PostMessage($local, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null }
+Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 
 # 2: SSH via PuTTY – its window is moved into the tab (connection refused: PuTTY shows the error).
