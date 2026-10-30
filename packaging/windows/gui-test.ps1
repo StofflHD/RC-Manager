@@ -115,8 +115,8 @@ Start-Sleep -Seconds 2
 # session, not on the runner's own desktop.
 $info = Join-Path $Out 'info.txt'
 $pw = 'Rc7' + [guid]::NewGuid().ToString('N').Substring(0, 16)
-net user rckeys $pw /add 2>&1 | Out-File -Append $info
-net localgroup 'Remote Desktop Users' rckeys /add 2>&1 | Out-File -Append $info
+New-LocalUser -Name rckeys -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -PasswordNeverExpires 2>&1 | Out-File -Append $info
+Add-LocalGroupMember -Group 'Remote Desktop Users' -Member rckeys 2>&1 | Out-File -Append $info
 python -c @"
 import json, sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
