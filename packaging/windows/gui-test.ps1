@@ -129,11 +129,9 @@ db.commit()
 $p = Start-App @('--data-dir', $data, '--connect', 'DC01') 'app-keys'
 Start-Sleep -Seconds 8
 [U]::Click(600, 362); Start-Sleep -Milliseconds 300
-[System.Windows.Forms.SendKeys]::SendWait('rckeys'); Start-Sleep -Milliseconds 300
-[U]::Click(600, 386); Start-Sleep -Milliseconds 300
-[System.Windows.Forms.SendKeys]::SendWait($env:COMPUTERNAME); Start-Sleep -Milliseconds 300
-[U]::Click(600, 411); Start-Sleep -Milliseconds 300
-[System.Windows.Forms.SendKeys]::SendWait($pw); Start-Sleep -Milliseconds 300
+foreach ($k in @('rckeys', '{TAB}', $env:COMPUTERNAME, '{TAB}', $pw)) {
+    [System.Windows.Forms.SendKeys]::SendWait($k); Start-Sleep -Milliseconds 400
+}
 [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Seconds 2
 Shot '1b-rdp-connecting'
 # The first logon of a new user prepares its profile.
