@@ -591,6 +591,20 @@ impl App {
                             .response
                             .on_hover_text("What happens when the server's certificate cannot be verified.");
                         ui.end_row();
+                        if cfg!(windows) {
+                            ui.label("RDP client");
+                            egui::ComboBox::from_id_salt("rdp_client")
+                                .selected_text(o.client.label())
+                                .width(240.0)
+                                .show_ui(ui, |ui| {
+                                    for k in RdpClient::ALL {
+                                        ui.selectable_value(&mut o.client, k, k.label());
+                                    }
+                                })
+                                .response
+                                .on_hover_text("For sessions in tabs. RemoteApp, separate windows and full screen always use FreeRDP.");
+                            ui.end_row();
+                        }
                         ui.label("Keyboard layout");
                         ui.add(egui::TextEdit::singleline(&mut o.keyboard_layout).hint_text("e.g. 00000409").desired_width(240.0));
                         ui.end_row();

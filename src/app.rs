@@ -1245,8 +1245,14 @@ impl App {
         // Own gateway credentials go to the client only, not into the session's copy.
         let with_gateway = self.with_gateway_credential(conn);
         let client_conn = with_gateway.as_ref().unwrap_or(conn);
-        // Windows: RDP in a tab with the ActiveX control; FreeRDP if it is off or not available.
-        if let Some(t) = embed.as_ref().filter(|_| cfg!(windows) && self.s.rdp_activex && conn.protocol == Protocol::Rdp) {
+        // Windows: RDP in a tab with the ActiveX control; FreeRDP if the connection or the
+        // options choose it, or the control is not available.
+        let activex = match conn.options.rdp.client {
+            RdpClient::Default => self.s.rdp_activex,
+            RdpClient::Windows => true,
+            RdpClient::FreeRdp => false,
+        };
+        if let Some(t) = embed.as_ref().filter(|_| cfg!(windows) && activex && conn.protocol == Protocol::Rdp) {
             if !conn.options.rdp.remote_app.trim().is_empty() {
                 self.push(Level::Info, format!("{}: RemoteApp runs with FreeRDP.", conn.name));
             } else {
