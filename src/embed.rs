@@ -428,6 +428,20 @@ mod imp {
     unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
         let target = KEY_TARGET.load(Ordering::Relaxed) as HWND;
         let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
+        if code == HC_ACTION as i32 {
+            let k = &*(lparam as *const KBDLLHOOKSTRUCT);
+            let thread = GetWindowThreadProcessId(main, std::ptr::null_mut());
+            let mut info: GUITHREADINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            GetGUIThreadInfo(thread, &mut info);
+            eprintln!(
+                "DEBUG key vk={:X} msg={wparam:X} target={target:?} main={main:?} fg={:?} focus={:?} focus_class={}",
+                k.vkCode,
+                GetForegroundWindow(),
+                info.hwndFocus,
+                class_name(info.hwndFocus)
+            );
+        }
         if code == HC_ACTION as i32 && !target.is_null() && focus_in(main, target) {
             let k = &*(lparam as *const KBDLLHOOKSTRUCT);
             let up = wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize;
@@ -741,12 +755,15 @@ mod imp {
             let input = win.map(hwnd).filter(|w| class_name(*w).starts_with("AtlAxWin")).and_then(|w| descendant(w, "IHWindowClass"));
             KEY_MAIN.store(self.main as isize, Ordering::Relaxed);
             KEY_TARGET.store(input.map_or(0, |w| w as isize), Ordering::Relaxed);
+            eprintln!("DEBUG forward_keys win={win:?} class={:?} input={input:?}", win.map(|w| class_name(hwnd(w))));
             if input.is_some() {
                 static HOOK: std::sync::Once = std::sync::Once::new();
                 // A thread of its own with a message loop, so the hook never waits for a frame.
                 HOOK.call_once(|| {
                     std::thread::spawn(|| unsafe {
-                        if SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0).is_null() {
+                        let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0);
+                        eprintln!("DEBUG hook installed: {}", !h.is_null());
+                        if h.is_null() {
                             return;
                         }
                         let mut msg: MSG = std::mem::zeroed();
