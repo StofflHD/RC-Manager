@@ -455,6 +455,8 @@ pub struct App {
     session_rect: Option<egui::Rect>,
     /// Session that has the keyboard focus.
     session_focus: Option<u64>,
+    /// The Windows RDP control that gets key combinations (see `Embedder::forward_keys`).
+    keys_to: Option<crate::embed::WinId>,
     /// Last time the focus was handed back to a session (see `has_focus`).
     focus_checked: Instant,
     unlock: Option<Unlock>,
@@ -654,6 +656,7 @@ impl App {
             reach: None,
             session_rect: None,
             session_focus: None,
+            keys_to: None,
             focus_checked: Instant::now(),
             unlock: None,
             typing: None,
@@ -1877,18 +1880,24 @@ impl App {
         match focus_change {
             Some(Some((session, host))) => {
                 emb.focus(emb.client_of(host));
-                // Key combinations go to a session of the Windows RDP control, if it wants them.
-                let remote = self.ax_sessions.contains_key(&session)
-                    && self.sessions.get(&session).is_some_and(|s| s.conn.options.rdp.shortcuts == RdpShortcuts::Remote);
-                emb.forward_keys(emb.client_of(host).filter(|_| remote));
                 self.session_focus = Some(session);
             }
             Some(None) => {
                 emb.focus(None);
-                emb.forward_keys(None);
                 self.session_focus = None;
             }
             None => {}
+        }
+        // Key combinations go to the shown session of the Windows RDP control if it wants them
+        // (only while it has the keyboard, which the hook checks itself).
+        let keys_to = self
+            .active_tab
+            .filter(|s| self.ax_sessions.contains_key(s) && self.sessions.get(s).is_some_and(|x| x.conn.options.rdp.shortcuts == RdpShortcuts::Remote))
+            .and_then(|s| self.tabs.iter().find(|t| t.session == s && t.ended.is_none()))
+            .and_then(|t| emb.client_of(t.host));
+        if keys_to != self.keys_to {
+            emb.forward_keys(keys_to);
+            self.keys_to = keys_to;
         }
         // Unlock: show the tab, give the session the keyboard, then type the password into it.
         let mut unlock_done = false;
