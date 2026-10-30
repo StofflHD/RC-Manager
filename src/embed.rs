@@ -426,6 +426,7 @@ mod imp {
     static WIN_HELD: AtomicBool = AtomicBool::new(false);
 
     unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
+        eprintln!("DEBUG hook called code={code}");
         let target = KEY_TARGET.load(Ordering::Relaxed) as HWND;
         let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
         if code == HC_ACTION as i32 {
@@ -767,9 +768,15 @@ mod imp {
                             return;
                         }
                         let mut msg: MSG = std::mem::zeroed();
-                        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                        loop {
+                            let r = GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0);
+                            eprintln!("DEBUG hook thread message r={r} msg={:X}", msg.message);
+                            if r <= 0 {
+                                break;
+                            }
                             DispatchMessageW(&msg);
                         }
+                        eprintln!("DEBUG hook thread ended");
                     });
                 });
             }
