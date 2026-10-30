@@ -152,7 +152,8 @@ $hooked = [U]::Hook()
 for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
 "Hook in the test process: installed $hooked, keys seen $([U]::Seen)" | Out-File -Append $info
 "Foreground before Win+R: $([U]::GetForegroundWindow()) (RC Manager $($p.MainWindowHandle))" | Out-File -Append $info
-[U]::WinR(); Start-Sleep -Seconds 4
+[U]::WinR()
+for ($i = 0; $i -lt 80; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
 Shot '1c-win-r'
 $local = [U]::FindWindow('#32770', 'Run')
 "Win+R in the RDP session: local Run dialog $(if ($local -ne [IntPtr]::Zero) { 'OPENED (key combination stayed local)' } else { 'not opened' })" |
