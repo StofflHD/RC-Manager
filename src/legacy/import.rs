@@ -223,6 +223,30 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
         }
     }
 
+    // Group settings (and settings assigned to folders) become settings profiles.
+    let in_folders: HashSet<&String> = folder_settings.values().flatten().collect();
+    let mut profiles = Vec::new();
+    for r in &setting_rows {
+        let Some(id) = guid(get(r, "id")) else { continue };
+        let protocol = match setting_type.get(&id).map(String::as_str) {
+            Some(TYPE_RDP) => Protocol::Rdp,
+            Some(TYPE_PUTTY) => Protocol::Ssh,
+            Some(TYPE_VNC) => Protocol::Vnc,
+            _ => continue,
+        };
+        let (Ok(uuid), true) = (Uuid::parse_str(&id), truthy(r.get("isgroup")) || in_folders.contains(&id)) else { continue };
+        let name = get(r, "name").trim();
+        let mut c = Connection::new(if name.is_empty() { protocol.label() } else { name }, protocol, None);
+        if let Some(Ok(g)) = setting_blobs.get(&id).filter(|b| !b.is_empty()).map(|b| nrbf::parse(b)) {
+            if let Some(f) = g.root_fields() {
+                apply_settings(&mut c, &f, &mut 0, &mut warnings);
+                gateway_credentials(&mut c, &mut credentials);
+            }
+        }
+        profiles.push(SettingsProfile { id: uuid, name: c.name, protocol, options: c.options });
+    }
+    let profile_ids: HashSet<String> = profiles.iter().map(|p| p.id.to_string()).collect();
+
     // Inheritance like GuiManager.GetConnectionCredentials/-Settings: up the folder chain,
     // the first entry with a matching protocol type wins.
     let inherited = |start: &str, links: &HashMap<String, Vec<String>>, types: &HashMap<String, String>, ty: &str| -> Option<String> {
@@ -265,6 +289,13 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
                 sorting: get(r, "sorting").parse().unwrap_or(0),
                 expanded: truthy(r.get("expandet")),
                 credential: pick.and_then(|c| Uuid::parse_str(c).ok()).map(CredentialRef::Id).unwrap_or(CredentialRef::None),
+                profiles: folder_settings
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|s| profile_ids.contains(*s))
+                    .filter_map(|s| Uuid::parse_str(s).ok())
+                    .collect(),
             })
         })
         .collect();
@@ -347,16 +378,21 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
 
         // Settings
         let setting = guid(get(&r, "setting")).unwrap_or_default();
-        let setting = if setting.is_empty() || setting == SETTING_INHERIT || setting == Uuid::nil().to_string() {
-            inherited(&parent_raw, &folder_settings, &setting_type, &ty)
-        } else {
-            Some(setting)
+        let inherits = setting.is_empty() || setting == SETTING_INHERIT || setting == Uuid::nil().to_string();
+        let setting = if inherits { inherited(&parent_raw, &folder_settings, &setting_type, &ty) } else { Some(setting) };
+        // A profile is used as such; individual settings become the connection's own (which
+        // are also filled in from a profile, as a fallback).
+        conn.settings = match setting.as_ref().filter(|s| profile_ids.contains(*s)).and_then(|s| Uuid::parse_str(s).ok()) {
+            Some(_) if inherits => SettingsRef::Inherit,
+            Some(id) => SettingsRef::Profile(id),
+            None => SettingsRef::Own,
         };
         if let Some(blob) = setting.and_then(|s| setting_blobs.get(&s)).filter(|b| !b.is_empty()) {
             match nrbf::parse(blob) {
                 Ok(g) => {
                     if let Some(f) = g.root_fields() {
                         apply_settings(&mut conn, &f, &mut port, &mut warnings);
+                        gateway_credentials(&mut conn, &mut credentials);
                     }
                 }
                 Err(e) => warnings.push(format!("Settings of \"{}\" are unreadable: {e}", conn.name)),
@@ -382,7 +418,7 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
         warnings.push(format!("{unknown_types} connection(s) of unknown type (plugins) skipped."));
     }
 
-    Ok(ImportResult { data: Data { folders: out_folders, connections, credentials }, warnings, skipped_deleted, backup: None })
+    Ok(ImportResult { data: Data { folders: out_folders, connections, credentials, profiles }, warnings, skipped_deleted, backup: None })
 }
 
 /// Splits a Windows command line: whitespace separates, double quotes group, backslashes
@@ -545,6 +581,32 @@ pub fn rtf_to_text(s: &str) -> String {
     out.trim().to_string()
 }
 
+/// Key of the original's `RdpSettings.GwPassword` (`SecurityCrypt.EncryptAesString`).
+const GATEWAY_KEY: &str = "jiosd23489034j(";
+
+/// Moves own gateway credentials of an imported connection into a credential set (an
+/// existing one with the same values, or a new one), so the password is stored encrypted.
+fn gateway_credentials(conn: &mut Connection, credentials: &mut Vec<Credential>) {
+    let o = &mut conn.options.rdp;
+    if o.gateway_user.is_empty() && o.gateway_password.is_empty() {
+        return;
+    }
+    let (user, domain, password) = (std::mem::take(&mut o.gateway_user), std::mem::take(&mut o.gateway_domain), std::mem::take(&mut o.gateway_password));
+    let id = match credentials.iter().find(|c| c.username == user && c.domain == domain && c.password == password) {
+        Some(c) => c.id,
+        None => {
+            let mut c = Credential::new(&format!("Gateway {}", if o.gateway.trim().is_empty() { user.as_str() } else { o.gateway.trim() }));
+            c.username = user;
+            c.domain = domain;
+            c.password = password;
+            let id = c.id;
+            credentials.push(c);
+            id
+        }
+    };
+    o.gateway_credential = Some(id);
+}
+
 fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warnings: &mut Vec<String>) {
     match conn.protocol {
         Protocol::Rdp => {
@@ -577,24 +639,68 @@ fn apply_settings(conn: &mut Connection, f: &nrbf::Fields, port: &mut u16, warni
             o.console = f.bool(&["Console"]).unwrap_or(false);
             o.microphone = f.bool(&["RemoteAudioCapture"]).unwrap_or(false);
             // RdpSoundMode: 0 = play locally, 1 = remote, 2 = not at all
-            o.sound = f.int(&["Sound"]).map(|s| s == 0).unwrap_or(true);
+            let sound = f.int(&["Sound"]).unwrap_or(0);
+            o.sound = sound == 0;
+            o.sound_remote = sound == 1;
+            // Experience and redirection, passed to the control as in the original.
+            for (name, value) in [
+                ("BackgroundPicture", &mut o.wallpaper),
+                ("ShowWindowContentsWhileDragging", &mut o.full_window_drag),
+                ("MenuAndWindowAnimation", &mut o.menu_animations),
+                ("VisualStyles", &mut o.themes),
+                ("FontSmoothing", &mut o.font_smoothing),
+                ("BitmapCaching", &mut o.bitmap_caching),
+                ("AutoQuality", &mut o.auto_detect),
+                ("DisableCompression", &mut o.disable_compression),
+                ("DisableSsp", &mut o.disable_nla),
+                ("RedirectPorts", &mut o.redirect_ports),
+                ("RedirectPnP", &mut o.redirect_pnp),
+            ] {
+                if let Some(v) = f.bool(&[name]) {
+                    *value = v;
+                }
+            }
+            // RdpShortcutMode: 0 = this computer, 1 = remote computer, 2 = only in full screen
+            match f.int(&["Shortcuts"]) {
+                Some(0) => o.shortcuts = RdpShortcuts::Local,
+                Some(1) => o.shortcuts = RdpShortcuts::Remote,
+                Some(2) => o.shortcuts = RdpShortcuts::FullScreen,
+                _ => {}
+            }
+            // RdpServerAuth: 0 = connect without warning (the original's default), 1 = do not
+            // connect, 2 = warn. An import never switches certificate checks off.
+            o.refuse_unverified = f.int(&["ServerAuthentication"]) == Some(1);
             // RdpDriveList: a list of drive letters plus an "all drives" flag. Windows drive
             // letters have no meaning here, so any shared drive becomes the home folder.
             let all_drives = f.nested(&["LocalDrives"]).and_then(|d| d.bool(&["AllDrives"])).unwrap_or(false);
             o.home_drive = all_drives || !f.strings(&["LocalDrives"]).is_empty();
-            // RdpGatewayType: 0 = TSC_PROXY_MODE_NONE_DIRECT (no gateway), 4 = no gateway with
-            // local bypass; 1, 2 and 3 use the gateway. The server field may be filled anyway.
-            if matches!(f.int(&["GwType"]), Some(1..=3)) {
-                o.gateway = f.string(&["GwServer"]).unwrap_or_default();
-                if f.bool(&["UseOwnGwCreds"]).unwrap_or(false) {
-                    o.gateway_user = f.string(&["GwUser"]).unwrap_or_default();
-                    o.gateway_domain = f.string(&["GwDomain"]).unwrap_or_default();
+            // RdpGatewayType: 0 and 4 = no gateway, 1 = this server, 2 and 3 = detect
+            // automatically (2 with local bypass). The server field may be filled anyway.
+            o.gateway_mode = Some(match f.int(&["GwType"]) {
+                Some(1) => GatewayMode::Manual,
+                Some(2 | 3) => GatewayMode::Auto,
+                _ => GatewayMode::Off,
+            });
+            o.gateway = f.string(&["GwServer"]).unwrap_or_default();
+            o.gateway_bypass_local = f.bool(&["GwBypass"]).unwrap_or(false);
+            // Own gateway credentials become a credential set (see `gateway_credentials`).
+            if o.gateway_mode != Some(GatewayMode::Off) && f.bool(&["UseOwnGwCreds"]).unwrap_or(false) {
+                o.gateway_user = f.string(&["GwUser"]).unwrap_or_default();
+                o.gateway_domain = f.string(&["GwDomain"]).unwrap_or_default();
+                let enc = f.string(&["_gwPassword", "GwPassword"]).unwrap_or_default();
+                if !enc.is_empty() {
+                    match crypto::decrypt_aes_string(&enc, GATEWAY_KEY) {
+                        Ok(p) => o.gateway_password = p,
+                        Err(_) => warnings.push(format!("{}: the gateway password could not be decrypted.", conn.name)),
+                    }
                 }
             }
             // "00000000" means "no preselection" in the original (its default).
             o.keyboard_layout = f.string(&["KeyboardLayout"]).filter(|k| crate::launch::keyboard_layout_id(k).is_some()).unwrap_or_default();
+            // A program started in the session instead of the desktop (not a RemoteApp).
             if f.bool(&["RunAppOnConnect"]).unwrap_or(false) {
-                o.remote_app = f.string(&["RunAppOnConnectPath"]).unwrap_or_default();
+                o.start_program = f.string(&["RunAppOnConnectPath"]).unwrap_or_default();
+                o.start_dir = f.string(&["RunAppOnConnectWorkingDir"]).unwrap_or_default();
             }
         }
         Protocol::Ssh => {
@@ -679,6 +785,13 @@ mod tests {
         assert!(dc.options.rdp.clipboard);
         assert_eq!(dc.credential, CredentialRef::Inherit);
         assert_eq!(dc.mac, "00:11:22:33:44:55");
+        // The group settings "RDP Gruppe" of folder "Kunde A" become a profile DC01 inherits.
+        let group = d.profiles.iter().find(|p| p.name == "RDP Gruppe").unwrap();
+        assert_eq!(group.protocol, Protocol::Rdp);
+        assert_eq!(group.options.rdp.resolution, "1920x1080");
+        assert_eq!(fa.profiles, vec![group.id]);
+        assert_eq!(dc.settings, SettingsRef::Inherit);
+        assert_eq!(d.profiles.len(), 1, "individual settings (\"ssh\") stay the connection's own");
 
         let ssh = d.connections.iter().find(|c| c.name == "Linux-Box").unwrap();
         assert_eq!(ssh.protocol, Protocol::Ssh);
@@ -687,6 +800,7 @@ mod tests {
         assert!(ssh.options.ssh.x11_forwarding);
         assert_eq!(ssh.options.ssh.extra_args, "");
         assert_eq!(ssh.credential, CredentialRef::Id(id("cccccccc-0000-0000-0000-000000000002")));
+        assert_eq!(ssh.settings, SettingsRef::Own);
 
         let web = d.connections.iter().find(|c| c.name == "Intranet").unwrap();
         assert_eq!(web.protocol, Protocol::Web);
@@ -713,6 +827,23 @@ mod tests {
         assert_eq!(r.backup.unwrap().version, "4.9.9.3");
     }
 
+    #[test]
+    fn own_gateway_credentials_become_a_credential_set() {
+        let mut creds = vec![Credential { id: Uuid::new_v4(), name: "gw".into(), username: "gwu".into(), domain: "D".into(), password: "pw".into() }];
+        let mut a = Connection::new("a", Protocol::Rdp, None);
+        a.options.rdp.gateway = "gw.local".into();
+        (a.options.rdp.gateway_user, a.options.rdp.gateway_domain, a.options.rdp.gateway_password) = ("gwu".into(), "D".into(), "pw".into());
+        let mut b = a.clone();
+        b.options.rdp.gateway_password = "other".into();
+        gateway_credentials(&mut a, &mut creds);
+        gateway_credentials(&mut b, &mut creds);
+        assert_eq!(a.options.rdp.gateway_credential, Some(creds[0].id), "an equal set is reused");
+        assert_eq!(creds.len(), 2);
+        assert_eq!(b.options.rdp.gateway_credential, Some(creds[1].id));
+        assert_eq!(creds[1].name, "Gateway gw.local");
+        assert!(b.options.rdp.gateway_user.is_empty() && b.options.rdp.gateway_password.is_empty());
+    }
+
     // Settings blob of a connection with the original's default values (generated with .NET).
     #[test]
     fn original_defaults_are_not_passed_on() {
@@ -726,8 +857,12 @@ mod tests {
         assert_eq!(o.window_mode, WindowMode::Tab);
         assert_eq!(o.resolution, "", "tabbed connections fit the window");
         assert!(o.dynamic_resolution);
-        assert_eq!(o.gateway, "", "gateway type 0 = no gateway");
+        assert_eq!(o.gateway_server(), None, "gateway type 0 = no gateway");
         assert_eq!(o.gateway_user, "");
+        assert_eq!(o.gateway_mode, Some(GatewayMode::Off));
+        assert!(!o.ignore_certificate && !o.refuse_unverified, "server authentication 0 is not taken over");
+        assert_eq!(o.start_program, "");
+        assert_eq!(o.remote_app, "");
         assert!(o.home_drive, "AllDrives");
         assert_eq!(o.color_depth, 32);
         assert_eq!(port, 0, "port 0 keeps the default");

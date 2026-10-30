@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 mod dialogs;
 mod editor;
+mod profiles;
 mod tree;
 
 /// Full text of the GPL-3.0, shown in the About window (CR are dropped when shown: Windows
@@ -455,6 +456,8 @@ pub struct App {
     session_rect: Option<egui::Rect>,
     /// Session that has the keyboard focus.
     session_focus: Option<u64>,
+    /// The Windows RDP control that gets key combinations (see `Embedder::forward_keys`).
+    keys_to: Option<crate::embed::WinId>,
     /// Last time the focus was handed back to a session (see `has_focus`).
     focus_checked: Instant,
     unlock: Option<Unlock>,
@@ -476,6 +479,11 @@ pub struct App {
     ctx: egui::Context,
 
     show_credentials: bool,
+    /// Settings profile manager: the selected profile and its unsaved form.
+    show_profiles: bool,
+    profile_selected: Option<Uuid>,
+    profile_edit: Option<SettingsProfile>,
+    profile_new: bool,
     cred_selected: Option<Uuid>,
     /// Working copy of the selected (or new) credentials in the credential manager.
     cred_edit: Option<Credential>,
@@ -654,6 +662,7 @@ impl App {
             reach: None,
             session_rect: None,
             session_focus: None,
+            keys_to: None,
             focus_checked: Instant::now(),
             unlock: None,
             typing: None,
@@ -668,6 +677,10 @@ impl App {
             events_rx,
             ctx: cc.egui_ctx.clone(),
             show_credentials: false,
+            show_profiles: false,
+            profile_selected: None,
+            profile_edit: None,
+            profile_new: false,
             cred_selected: None,
             cred_edit: None,
             new_cred: None,
@@ -762,6 +775,40 @@ impl App {
         self.data.folders.iter().find(|f| f.id == id)
     }
 
+    fn profile(&self, id: Uuid) -> Option<&SettingsProfile> {
+        self.data.profiles.iter().find(|p| p.id == id)
+    }
+
+    /// The profile `folder` (or the nearest parent folder with one) has for `protocol`.
+    fn folder_profile(&self, mut folder: Option<Uuid>, protocol: Protocol) -> Option<&SettingsProfile> {
+        for _ in 0..256 {
+            let f = self.folder(folder?)?;
+            if let Some(p) = f.profiles.iter().filter_map(|id| self.profile(*id)).find(|p| p.protocol == protocol) {
+                return Some(p);
+            }
+            folder = f.parent;
+        }
+        None
+    }
+
+    /// The profile whose settings a connection uses; `None`: its own.
+    fn settings_profile(&self, conn: &Connection) -> Option<&SettingsProfile> {
+        match conn.settings {
+            SettingsRef::Own => None,
+            SettingsRef::Profile(id) => self.profile(id).filter(|p| p.protocol == conn.protocol),
+            SettingsRef::Inherit => self.folder_profile(conn.parent, conn.protocol),
+        }
+    }
+
+    /// The connection with the settings it uses.
+    fn with_settings(&self, conn: &Connection) -> Connection {
+        let mut c = conn.clone();
+        if let Some(p) = self.settings_profile(conn) {
+            c.options = p.options.clone();
+        }
+        c
+    }
+
     fn connection(&self, id: Uuid) -> Option<&Connection> {
         self.data.connections.iter().find(|c| c.id == id)
     }
@@ -790,6 +837,17 @@ impl App {
             .iter()
             .find(|t| t.ended.is_none() && self.sessions.get(&t.session).is_some_and(|s| s.conn.id == conn))
             .map(|t| t.session)
+    }
+
+    /// The connection with its own RD Gateway credentials filled in, if it has some.
+    fn with_gateway_credential(&self, conn: &Connection) -> Option<Connection> {
+        let g = self.credential(conn.options.rdp.gateway_credential?)?;
+        let mut c = conn.clone();
+        let o = &mut c.options.rdp;
+        o.gateway_user = g.username.clone();
+        o.gateway_domain = g.domain.clone();
+        o.gateway_password = g.password.clone();
+        Some(c)
     }
 
     /// Resolves credentials; `Inherit` walks up the folder tree.
@@ -1180,13 +1238,25 @@ impl App {
     }
 
     fn launch(&mut self, conn: &Connection, cred: Option<&Credential>) {
+        // The settings of its profile, if it uses one.
+        let resolved = self.with_settings(conn);
+        let conn = &resolved;
         let embed = self.embed_target(conn);
-        // Windows: RDP in a tab with the ActiveX control; FreeRDP if it is off or not available.
-        if let Some(t) = embed.as_ref().filter(|_| cfg!(windows) && self.s.rdp_activex && conn.protocol == Protocol::Rdp) {
+        // Own gateway credentials go to the client only, not into the session's copy.
+        let with_gateway = self.with_gateway_credential(conn);
+        let client_conn = with_gateway.as_ref().unwrap_or(conn);
+        // Windows: RDP in a tab with the ActiveX control; FreeRDP if the connection or the
+        // options choose it, or the control is not available.
+        let activex = match conn.options.rdp.client {
+            RdpClient::Default => self.s.rdp_activex,
+            RdpClient::Windows => true,
+            RdpClient::FreeRdp => false,
+        };
+        if let Some(t) = embed.as_ref().filter(|_| cfg!(windows) && activex && conn.protocol == Protocol::Rdp) {
             if !conn.options.rdp.remote_app.trim().is_empty() {
                 self.push(Level::Info, format!("{}: RemoteApp runs with FreeRDP.", conn.name));
             } else {
-                match crate::rdpax::RdpAx::connect(t.host, t.width, t.height, conn, cred) {
+                match crate::rdpax::RdpAx::connect(t.host, t.width, t.height, client_conn, cred) {
                     Ok(ax) => {
                         if !conn.options.rdp.extra_args.trim().is_empty() {
                             self.push(Level::Warn, format!("{}: the extra FreeRDP arguments are ignored by the Windows RDP client.", conn.name));
@@ -1204,7 +1274,7 @@ impl App {
         } else {
             None
         };
-        let plan = match launch::plan(conn, cred, &self.tools, embed.as_ref(), fingerprint.as_deref()) {
+        let plan = match launch::plan(client_conn, cred, &self.tools, embed.as_ref(), fingerprint.as_deref()) {
             Ok(p) => p,
             Err(e) => {
                 if let (Some(emb), Some(t)) = (&self.embedder, &embed) {
@@ -1870,6 +1940,17 @@ impl App {
                 self.session_focus = None;
             }
             None => {}
+        }
+        // Key combinations go to the shown session of the Windows RDP control if it wants them
+        // (only while it has the keyboard, which the hook checks itself).
+        let keys_to = self
+            .active_tab
+            .filter(|s| self.ax_sessions.contains_key(s) && self.sessions.get(s).is_some_and(|x| x.conn.options.rdp.shortcuts == RdpShortcuts::Remote))
+            .and_then(|s| self.tabs.iter().find(|t| t.session == s && t.ended.is_none()))
+            .and_then(|t| emb.client_of(t.host));
+        if keys_to != self.keys_to {
+            emb.forward_keys(keys_to);
+            self.keys_to = keys_to;
         }
         // Unlock: show the tab, give the session the keyboard, then type the password into it.
         let mut unlock_done = false;

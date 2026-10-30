@@ -36,7 +36,7 @@ fn extended_reason(code: i32) -> String {
 #[cfg(windows)]
 mod imp {
     use crate::embed::WinId;
-    use crate::model::{Connection, Credential};
+    use crate::model::{Connection, Credential, GatewayMode};
     use anyhow::{anyhow, bail, Context, Result};
     use std::cell::Cell;
     use std::time::{Duration, Instant};
@@ -245,9 +245,9 @@ mod imp {
                 a.put("ClearTextPassword", BSTR::from(k.password.as_str()))?;
             }
             a.put("RDPPort", conn.effective_port() as i32)?;
-            a.put("EnableCredSspSupport", true)?;
-            // 2: warn about certificates that cannot be verified (the control's own dialog).
-            a.put("AuthenticationLevel", if o.ignore_certificate { 0 } else { 2 })?;
+            a.put("EnableCredSspSupport", !o.disable_nla)?;
+            // 0: connect without warning, 1: do not connect, 2: warn (the control's own dialog).
+            a.put("AuthenticationLevel", if o.ignore_certificate { 0 } else if o.refuse_unverified { 1 } else { 2 })?;
             // Without dynamic resolution the desktop is scaled into the tab, as with FreeRDP.
             a.put("SmartSizing", !o.dynamic_resolution)?;
             a.put("EnableAutoReconnect", true)?;
@@ -258,21 +258,49 @@ mod imp {
             a.put("RedirectClipboard", o.clipboard).ok();
             a.put("ConnectToAdministerServer", o.console).ok();
             a.put("AudioCaptureRedirectionMode", o.microphone).ok();
+            a.put("RedirectPorts", o.redirect_ports).ok();
+            a.put("RedirectDevices", o.redirect_pnp).ok();
+            // Experience: the flags switch features off (1 wallpaper, 2 full window drag,
+            // 4 menu animations, 8 themes), 0x80 switches font smoothing on.
+            let flags = [(!o.wallpaper, 0x1), (!o.full_window_drag, 0x2), (!o.menu_animations, 0x4), (!o.themes, 0x8), (o.font_smoothing, 0x80)]
+                .iter()
+                .filter(|(on, _)| *on)
+                .fold(0, |f, (_, bit)| f | bit);
+            a.put("PerformanceFlags", flags).ok();
+            a.put("BandwidthDetection", o.auto_detect).ok();
+            a.put("BitmapPersistence", o.bitmap_caching as i32).ok();
+            a.put("Compress", (!o.disable_compression) as i32).ok();
             if let Ok(s) = c.newest(&["SecuredSettings3", "SecuredSettings2"]) {
-                // 0: play sounds on this computer, 2: do not play them.
-                s.put("AudioRedirectionMode", if o.sound { 0 } else { 2 }).ok();
-            }
-            if !o.gateway.trim().is_empty() {
-                let t = c.newest(&["TransportSettings4", "TransportSettings3", "TransportSettings2", "TransportSettings"])?;
-                t.put("GatewayHostname", BSTR::from(o.gateway.trim()))?;
-                t.put("GatewayUsageMethod", 1)?; // always use the gateway
-                t.put("GatewayProfileUsageMethod", 1)?; // explicit settings
-                t.put("GatewayCredSharing", 1).ok();
-                if !o.gateway_user.is_empty() {
-                    t.put("GatewayUsername", BSTR::from(o.gateway_user.as_str())).ok();
+                // 0: play sounds on this computer, 1: on the remote computer, 2: do not play them.
+                s.put("AudioRedirectionMode", if o.sound { 0 } else if o.sound_remote { 1 } else { 2 }).ok();
+                // RC Manager sends key combinations to the session itself (`Embedder::forward_keys`);
+                // the control's own keyboard hook would only get in the way.
+                s.put("KeyboardHookMode", 0).ok();
+                if o.remote_app.trim().is_empty() && !o.start_program.trim().is_empty() {
+                    s.put("StartProgram", BSTR::from(o.start_program.trim())).ok();
+                    s.put("WorkDir", BSTR::from(o.start_dir.trim())).ok();
                 }
-                if !o.gateway_domain.is_empty() {
-                    t.put("GatewayDomain", BSTR::from(o.gateway_domain.as_str())).ok();
+            }
+            let detect = o.gateway_mode() == GatewayMode::Auto;
+            if detect || o.gateway_server().is_some() {
+                // As in the original: 1 always, 2 except for local addresses, 3 detect.
+                let t = c.newest(&["TransportSettings4", "TransportSettings3", "TransportSettings2", "TransportSettings"])?;
+                if let Some(server) = o.gateway_server() {
+                    t.put("GatewayHostname", BSTR::from(server))?;
+                }
+                t.put("GatewayUsageMethod", if o.gateway_bypass_local { 2 } else if detect { 3 } else { 1 })?;
+                t.put("GatewayProfileUsageMethod", 1)?; // explicit settings
+                if o.gateway_user.is_empty() {
+                    t.put("GatewayCredSharing", 1).ok(); // the connection's credentials
+                } else {
+                    t.put("GatewayCredSharing", 0).ok();
+                    t.put("GatewayUsername", BSTR::from(o.gateway_user.as_str())).ok();
+                    if !o.gateway_domain.is_empty() {
+                        t.put("GatewayDomain", BSTR::from(o.gateway_domain.as_str())).ok();
+                    }
+                    if !o.gateway_password.is_empty() {
+                        t.put("GatewayPassword", BSTR::from(o.gateway_password.as_str())).ok();
+                    }
                 }
             }
             Ok(o.dynamic_resolution)

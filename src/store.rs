@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS connections (
     sorting INTEGER NOT NULL DEFAULT 0,
     last_connected TEXT
 );
+CREATE TABLE IF NOT EXISTS profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    options TEXT NOT NULL DEFAULT '{}'
+);
 CREATE TABLE IF NOT EXISTS credentials (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -59,6 +65,7 @@ pub struct Data {
     pub folders: Vec<Folder>,
     pub connections: Vec<Connection>,
     pub credentials: Vec<Credential>,
+    pub profiles: Vec<SettingsProfile>,
 }
 
 /// Marker in exported files so an import can recognise them.
@@ -76,6 +83,8 @@ struct Export {
     connections: Vec<Connection>,
     #[serde(default)]
     credentials: Vec<Credential>,
+    #[serde(default)]
+    profiles: Vec<SettingsProfile>,
 }
 
 /// Serialises the data to the export JSON (contains passwords in clear text).
@@ -86,6 +95,7 @@ pub fn export_json(data: &Data) -> Result<String> {
         folders: data.folders.clone(),
         connections: data.connections.clone(),
         credentials: data.credentials.clone(),
+        profiles: data.profiles.clone(),
     };
     Ok(serde_json::to_string_pretty(&e)?)
 }
@@ -96,7 +106,7 @@ pub fn import_json(text: &str) -> Result<Data> {
     if e.format != EXPORT_FORMAT {
         bail!("Not an RC Manager export (format \"{}\").", e.format);
     }
-    Ok(Data { folders: e.folders, connections: e.connections, credentials: e.credentials })
+    Ok(Data { folders: e.folders, connections: e.connections, credentials: e.credentials, profiles: e.profiles })
 }
 
 fn uuid_opt(s: Option<String>) -> Option<Uuid> {
@@ -109,6 +119,30 @@ fn cred_ref_to_str(c: CredentialRef) -> String {
         CredentialRef::Inherit => "inherit".into(),
         CredentialRef::Id(id) => id.to_string(),
     }
+}
+
+fn settings_ref_to_str(s: SettingsRef) -> String {
+    match s {
+        SettingsRef::Own => "own".into(),
+        SettingsRef::Inherit => "inherit".into(),
+        SettingsRef::Profile(id) => id.to_string(),
+    }
+}
+
+fn settings_ref_from_str(s: &str) -> SettingsRef {
+    match s {
+        "inherit" => SettingsRef::Inherit,
+        _ => Uuid::parse_str(s).map(SettingsRef::Profile).unwrap_or_default(),
+    }
+}
+
+/// Adds a column that databases of older versions lack.
+fn add_column(db: &Db, table: &str, column: &str, decl: &str) -> Result<()> {
+    let exists = db.prepare(&format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"))?.exists([column])?;
+    if !exists {
+        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    Ok(())
 }
 
 fn cred_ref_from_str(s: &str) -> CredentialRef {
@@ -169,6 +203,8 @@ impl Store {
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "foreign_keys", "ON")?;
         db.execute_batch(SCHEMA)?;
+        add_column(&db, "folders", "profiles", "TEXT NOT NULL DEFAULT '[]'")?;
+        add_column(&db, "connections", "settings", "TEXT NOT NULL DEFAULT 'own'")?;
         Ok(Self { db, dir: dir.to_path_buf(), vault: None })
     }
 
@@ -262,11 +298,16 @@ impl Store {
     }
 
     pub fn load(&self) -> Result<Data> {
-        Ok(Data { folders: self.load_folders()?, connections: self.load_connections()?, credentials: self.load_credentials()? })
+        Ok(Data {
+            folders: self.load_folders()?,
+            connections: self.load_connections()?,
+            credentials: self.load_credentials()?,
+            profiles: self.load_profiles()?,
+        })
     }
 
     fn load_folders(&self) -> Result<Vec<Folder>> {
-        let mut stmt = self.db.prepare("SELECT id, parent, name, description, sorting, expanded, credential FROM folders")?;
+        let mut stmt = self.db.prepare("SELECT id, parent, name, description, sorting, expanded, credential, profiles FROM folders")?;
         let rows = stmt.query_map([], |r| {
             let parent = uuid_opt(r.get(1)?);
             // The column held a bare UUID or NULL before folders used a CredentialRef. A NULL
@@ -285,6 +326,7 @@ impl Store {
                 sorting: r.get(4)?,
                 expanded: r.get::<_, i64>(5)? != 0,
                 credential,
+                profiles: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -292,7 +334,7 @@ impl Store {
 
     fn load_connections(&self) -> Result<Vec<Connection>> {
         let mut stmt = self.db.prepare(
-            "SELECT id, parent, name, protocol, host, port, description, credential, options, mac, sorting, last_connected FROM connections",
+            "SELECT id, parent, name, protocol, host, port, description, credential, options, mac, sorting, last_connected, settings FROM connections",
         )?;
         let rows = stmt.query_map([], |r| {
             let options: String = r.get(8)?;
@@ -309,6 +351,7 @@ impl Store {
                 port: r.get::<_, i64>(5)?.clamp(0, 65535) as u16,
                 description: r.get(6)?,
                 credential: cred_ref_from_str(&r.get::<_, String>(7)?),
+                settings: settings_ref_from_str(&r.get::<_, String>(12)?),
                 options: serde_json::from_str(&options).unwrap_or_default(),
                 mac: r.get(9)?,
                 sorting: r.get(10)?,
@@ -316,6 +359,32 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn load_profiles(&self) -> Result<Vec<SettingsProfile>> {
+        let mut stmt = self.db.prepare("SELECT id, name, protocol, options FROM profiles")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SettingsProfile {
+                id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+                name: r.get(1)?,
+                protocol: Protocol::from_key(&r.get::<_, String>(2)?).unwrap_or(Protocol::Rdp),
+                options: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn save_profile(&self, p: &SettingsProfile) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO profiles (id, name, protocol, options) VALUES (?1, ?2, ?3, ?4)",
+            params![p.id.to_string(), p.name, p.protocol.key(), serde_json::to_string(&p.options)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_profile(&self, id: Uuid) -> Result<()> {
+        self.db.execute("DELETE FROM profiles WHERE id = ?1", [id.to_string()])?;
+        Ok(())
     }
 
     fn load_credentials(&self) -> Result<Vec<Credential>> {
@@ -338,8 +407,17 @@ impl Store {
 
     pub fn save_folder(&self, f: &Folder) -> Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO folders (id, parent, name, description, sorting, expanded, credential) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![f.id.to_string(), f.parent.map(|p| p.to_string()), f.name, f.description, f.sorting, f.expanded as i64, cred_ref_to_str(f.credential)],
+            "INSERT OR REPLACE INTO folders (id, parent, name, description, sorting, expanded, credential, profiles) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                f.id.to_string(),
+                f.parent.map(|p| p.to_string()),
+                f.name,
+                f.description,
+                f.sorting,
+                f.expanded as i64,
+                cred_ref_to_str(f.credential),
+                serde_json::to_string(&f.profiles)?
+            ],
         )?;
         Ok(())
     }
@@ -351,8 +429,8 @@ impl Store {
 
     pub fn save_connection(&self, c: &Connection) -> Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO connections (id, parent, name, protocol, host, port, description, credential, options, mac, sorting, last_connected)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT OR REPLACE INTO connections (id, parent, name, protocol, host, port, description, credential, options, mac, sorting, last_connected, settings)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 c.id.to_string(),
                 c.parent.map(|p| p.to_string()),
@@ -365,7 +443,8 @@ impl Store {
                 serde_json::to_string(&c.options)?,
                 c.mac,
                 c.sorting,
-                c.last_connected
+                c.last_connected,
+                settings_ref_to_str(c.settings)
             ],
         )?;
         Ok(())
@@ -418,6 +497,9 @@ impl Store {
         for c in &data.credentials {
             self.save_credential(c)?;
         }
+        for p in &data.profiles {
+            self.save_profile(p)?;
+        }
         for c in &data.connections {
             self.save_connection(c)?;
         }
@@ -455,6 +537,54 @@ mod tests {
         s.unlock(None).unwrap();
         assert_eq!(s.load().unwrap().folders, vec![f]);
         assert!(!dir.join("rdp-manager.db3").exists());
+        drop(s);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn profiles_and_their_use_are_stored() {
+        let dir = temp_dir("profiles");
+        let mut p = SettingsProfile::new("Servers", Protocol::Rdp);
+        p.options.rdp.wallpaper = false;
+        let mut f = Folder::new("Customers", None);
+        f.profiles = vec![p.id];
+        let mut c = Connection::new("Server 1", Protocol::Rdp, Some(f.id));
+        c.settings = SettingsRef::Profile(p.id);
+        {
+            let mut s = Store::open(&dir).unwrap();
+            s.unlock(None).unwrap();
+            s.save_all(&Data { folders: vec![f.clone()], connections: vec![c.clone()], credentials: Vec::new(), profiles: vec![p.clone()] }).unwrap();
+        }
+        let mut s = Store::open(&dir).unwrap();
+        s.unlock(None).unwrap();
+        let d = s.load().unwrap();
+        assert_eq!(d.profiles, vec![p.clone()]);
+        assert_eq!(d.folders, vec![f]);
+        assert_eq!(d.connections, vec![c]);
+        s.delete_profile(p.id).unwrap();
+        assert!(s.load().unwrap().profiles.is_empty());
+        drop(s);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn older_databases_get_the_new_columns() {
+        let dir = temp_dir("columns");
+        {
+            // The tables of a version before settings profiles.
+            let db = Db::open(dir.join("rc-manager.db3")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE folders (id TEXT PRIMARY KEY, parent TEXT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+                     sorting INTEGER NOT NULL DEFAULT 0, expanded INTEGER NOT NULL DEFAULT 1, credential TEXT);
+                 INSERT INTO folders (id, name) VALUES ('6f1c3c2e-0000-4000-8000-000000000001', 'Old');",
+            )
+            .unwrap();
+        }
+        let mut s = Store::open(&dir).unwrap();
+        s.unlock(None).unwrap();
+        let d = s.load().unwrap();
+        assert_eq!(d.folders[0].name, "Old");
+        assert!(d.folders[0].profiles.is_empty());
         drop(s);
         std::fs::remove_dir_all(dir).ok();
     }
@@ -518,7 +648,7 @@ mod tests {
         let mut c = Connection::new("Server 1", Protocol::Rdp, Some(f.id));
         c.host = "srv1.example.org".into();
         c.credential = CredentialRef::Id(cred.id);
-        let data = Data { folders: vec![f], connections: vec![c], credentials: vec![cred] };
+        let data = Data { folders: vec![f], connections: vec![c], credentials: vec![cred], profiles: Vec::new() };
 
         let json = export_json(&data).unwrap();
         let back = import_json(&json).unwrap();

@@ -177,21 +177,118 @@ pub struct RdpOptions {
     /// 0 = default
     pub color_depth: u8,
     pub clipboard: bool,
+    /// Play audio on this computer; otherwise on the remote computer (`sound_remote`) or not at all.
     pub sound: bool,
+    pub sound_remote: bool,
     pub microphone: bool,
     pub printers: bool,
     pub smartcards: bool,
     pub home_drive: bool,
     /// Additional drives as "name=/path"
     pub drives: Vec<String>,
+    /// Serial and parallel ports, Plug and Play devices (Windows RDP client only).
+    pub redirect_ports: bool,
+    pub redirect_pnp: bool,
     pub console: bool,
+    /// Server authentication: connect without warning (`ignore_certificate`), refuse a
+    /// certificate that cannot be verified (`refuse_unverified`), or warn (neither).
     pub ignore_certificate: bool,
+    pub refuse_unverified: bool,
+    /// Without Network Level Authentication (CredSSP).
+    pub disable_nla: bool,
+    /// Experience: what the remote desktop shows (performance flags).
+    pub wallpaper: bool,
+    pub full_window_drag: bool,
+    pub menu_animations: bool,
+    pub themes: bool,
+    pub font_smoothing: bool,
+    pub bitmap_caching: bool,
+    /// Let client and server detect the connection quality.
+    pub auto_detect: bool,
+    pub disable_compression: bool,
+    /// Where Windows key combinations such as Alt+Tab apply.
+    pub shortcuts: RdpShortcuts,
+    /// `None` (connections from before this option): use `gateway` when one is entered.
+    pub gateway_mode: Option<GatewayMode>,
     pub gateway: String,
+    pub gateway_bypass_local: bool,
+    /// Own gateway credentials; otherwise `gateway_user`/`gateway_domain` or the connection's.
+    pub gateway_credential: Option<Uuid>,
     pub gateway_user: String,
     pub gateway_domain: String,
+    /// Filled from `gateway_credential` just before a connection starts; never stored.
+    #[serde(skip)]
+    pub gateway_password: String,
     pub keyboard_layout: String,
     pub remote_app: String,
+    /// Program started instead of the desktop shell, and its working directory.
+    pub start_program: String,
+    pub start_dir: String,
     pub extra_args: String,
+    /// Windows: the RDP client for sessions in tabs.
+    pub client: RdpClient,
+}
+
+/// The RDP client on Windows: the Remote Desktop ActiveX control of mstsc.exe, or FreeRDP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RdpClient {
+    /// As set in *Options → Windows RDP Client in Tabs*.
+    #[default]
+    Default,
+    Windows,
+    FreeRdp,
+}
+
+impl RdpClient {
+    pub const ALL: [RdpClient; 3] = [RdpClient::Default, RdpClient::Windows, RdpClient::FreeRdp];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RdpClient::Default => "Default (Options)",
+            RdpClient::Windows => "Windows RDP client (mstsc)",
+            RdpClient::FreeRdp => "FreeRDP",
+        }
+    }
+}
+
+/// Where Windows key combinations apply (`KeyboardHookMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RdpShortcuts {
+    Local,
+    #[default]
+    Remote,
+    FullScreen,
+}
+
+impl RdpShortcuts {
+    pub const ALL: [RdpShortcuts; 3] = [RdpShortcuts::Local, RdpShortcuts::Remote, RdpShortcuts::FullScreen];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RdpShortcuts::Local => "On this computer",
+            RdpShortcuts::Remote => "On the remote computer",
+            RdpShortcuts::FullScreen => "Only in full screen",
+        }
+    }
+}
+
+/// RD Gateway use, as in the original: not at all, detected automatically, or this server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GatewayMode {
+    Off,
+    Auto,
+    Manual,
+}
+
+impl RdpOptions {
+    pub fn gateway_mode(&self) -> GatewayMode {
+        self.gateway_mode.unwrap_or(if self.gateway.trim().is_empty() { GatewayMode::Off } else { GatewayMode::Manual })
+    }
+
+    /// The gateway server to use, if any.
+    pub fn gateway_server(&self) -> Option<&str> {
+        Some(self.gateway.trim()).filter(|g| self.gateway_mode() == GatewayMode::Manual && !g.is_empty())
+    }
 }
 
 impl Default for RdpOptions {
@@ -204,19 +301,40 @@ impl Default for RdpOptions {
             color_depth: 0,
             clipboard: true,
             sound: true,
+            sound_remote: false,
             microphone: false,
             printers: false,
             smartcards: false,
             home_drive: false,
             drives: Vec::new(),
+            redirect_ports: false,
+            redirect_pnp: false,
             console: false,
             ignore_certificate: false,
+            refuse_unverified: false,
+            disable_nla: false,
+            wallpaper: true,
+            full_window_drag: false,
+            menu_animations: false,
+            themes: true,
+            font_smoothing: true,
+            bitmap_caching: false,
+            auto_detect: true,
+            disable_compression: false,
+            shortcuts: RdpShortcuts::Remote,
+            gateway_mode: None,
             gateway: String::new(),
+            gateway_bypass_local: false,
+            gateway_credential: None,
             gateway_user: String::new(),
             gateway_domain: String::new(),
+            gateway_password: String::new(),
             keyboard_layout: String::new(),
             remote_app: String::new(),
+            start_program: String::new(),
+            start_dir: String::new(),
             extra_args: String::new(),
+            client: RdpClient::Default,
         }
     }
 }
@@ -268,13 +386,48 @@ pub struct Folder {
     /// Credentials used by connections (and sub-folders) that inherit. `Inherit` takes them from
     /// the parent folder, so nested folders can share one set; `None` stops the inheritance here.
     pub credential: CredentialRef,
+    /// Settings profiles (at most one per protocol) for connections in this folder and its
+    /// sub-folders that inherit their settings.
+    #[serde(default)]
+    pub profiles: Vec<Uuid>,
 }
 
 impl Folder {
     pub fn new(name: &str, parent: Option<Uuid>) -> Self {
         let credential = if parent.is_some() { CredentialRef::Inherit } else { CredentialRef::None };
-        Self { id: Uuid::new_v4(), parent, name: name.into(), description: String::new(), sorting: 0, expanded: true, credential }
+        Self { id: Uuid::new_v4(), parent, name: name.into(), description: String::new(), sorting: 0, expanded: true, credential, profiles: Vec::new() }
     }
+}
+
+/// Named settings for the connections of one protocol – the original's group settings. A
+/// connection uses its own settings, a profile, or the profile its folder (or the nearest parent
+/// folder with one for its protocol) has.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsProfile {
+    pub id: Uuid,
+    pub name: String,
+    pub protocol: Protocol,
+    pub options: ProtocolOptions,
+}
+
+impl SettingsProfile {
+    /// The protocols that have settings worth sharing.
+    pub const PROTOCOLS: [Protocol; 3] = [Protocol::Rdp, Protocol::Ssh, Protocol::Vnc];
+
+    pub fn new(name: &str, protocol: Protocol) -> Self {
+        Self { id: Uuid::new_v4(), name: name.into(), protocol, options: ProtocolOptions::default() }
+    }
+}
+
+/// Where a connection's protocol settings come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SettingsRef {
+    /// Its own `options`.
+    #[default]
+    Own,
+    /// The profile of its folder or the nearest parent folder (its own options without one).
+    Inherit,
+    Profile(Uuid),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -288,6 +441,9 @@ pub struct Connection {
     pub port: u16,
     pub description: String,
     pub credential: CredentialRef,
+    /// Where the protocol settings come from: `options`, a profile, or the folders.
+    #[serde(default)]
+    pub settings: SettingsRef,
     pub options: ProtocolOptions,
     pub mac: String,
     pub sorting: i64,
@@ -305,6 +461,7 @@ impl Connection {
             port: 0,
             description: String::new(),
             credential: if parent.is_some() { CredentialRef::Inherit } else { CredentialRef::None },
+            settings: if parent.is_some() { SettingsRef::Inherit } else { SettingsRef::Own },
             options: ProtocolOptions::default(),
             mac: String::new(),
             sorting: 0,

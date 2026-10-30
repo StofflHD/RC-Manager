@@ -105,6 +105,36 @@ Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 Get-Process wfreerdp -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 
+# 1b: a session of the Windows RDP control: a test user logs on to the runner. (Key
+# combinations cannot be checked here: injected keys reach no low-level keyboard hook on the
+# runner.)
+$info = Join-Path $Out 'info.txt'
+$pw = 'Rc7' + [guid]::NewGuid().ToString('N').Substring(0, 16)
+New-LocalUser -Name rckeys -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -PasswordNeverExpires 2>&1 | Out-File -Append $info
+Add-LocalGroupMember -Group 'Remote Desktop Users' -Member rckeys 2>&1 | Out-File -Append $info
+python -c @"
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+for i, o in db.execute("SELECT id, options FROM connections WHERE name = 'DC01'").fetchall():
+    o = json.loads(o)
+    o.setdefault('rdp', {}).update(ignore_certificate=True, shortcuts='Remote')
+    db.execute('UPDATE connections SET options = ? WHERE id = ?', (json.dumps(o), i))
+db.commit()
+"@ (Join-Path $data 'rc-manager.db3')
+$p = Start-App @('--data-dir', $data, '--connect', 'DC01') 'app-keys'
+Start-Sleep -Seconds 8
+[U]::Click(600, 362); Start-Sleep -Milliseconds 300
+foreach ($k in @('rckeys', '{TAB}', $env:COMPUTERNAME, '{TAB}', $pw)) {
+    [System.Windows.Forms.SendKeys]::SendWait($k); Start-Sleep -Milliseconds 400
+}
+[System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Seconds 2
+Shot '1b-rdp-connecting'
+# The first logon of a new user prepares its profile.
+Start-Sleep -Seconds 90
+Shot '1b-rdp-session'
+Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 2
+
 # 2: SSH via PuTTY – its window is moved into the tab (connection refused: PuTTY shows the error).
 $p = Start-App @('--data-dir', $data, '--connect', 'Linux-Box') 'app-ssh'
 Start-Sleep -Seconds 10

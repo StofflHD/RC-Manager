@@ -42,6 +42,10 @@ impl App {
                         self.show_credentials = true;
                         ui.close_menu();
                     }
+                    if ui.button("⚙ Settings Profiles …").on_hover_text("Shared settings for connections, like the original's group settings").clicked() {
+                        self.open_profile(None);
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Options", |ui| {
                     ui.checkbox(&mut self.s.dark, "Dark Theme");

@@ -176,6 +176,7 @@ mod imp {
 
         /// The host's size has settled (X11 clients follow their window size by themselves).
         pub fn resized(&self, _host: WinId) {}
+        pub fn forward_keys(&self, _win: Option<WinId>) {}
 
         /// Whether RC Manager's window is the active one and an embedded client has the focus;
         /// on X11 the window manager restores the focus of embedded clients by itself.
@@ -336,6 +337,7 @@ mod imp {
         }
         pub fn focus(&self, _win: Option<WinId>) {}
         pub fn resized(&self, _host: WinId) {}
+        pub fn forward_keys(&self, _win: Option<WinId>) {}
         pub fn active(&self) -> bool {
             false
         }
@@ -368,8 +370,10 @@ mod imp {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, GetKeyboardLayout, MapVirtualKeyExW, SendInput, SetFocus, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, VK_LBUTTON,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_LWIN, VK_RWIN, VK_SPACE,
+        VK_TAB,
     };
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     pub struct Embedder {
@@ -413,6 +417,52 @@ mod imp {
     /// The first window of class `class` below `parent` (any depth).
     fn descendant(parent: HWND, class: &str) -> Option<HWND> {
         children(parent).into_iter().find_map(|c| if class_name(c) == class { Some(c) } else { descendant(c, class) })
+    }
+
+    /// The control (its ATL host window) that gets key combinations, and RC Manager's window.
+    static KEY_TARGET: AtomicIsize = AtomicIsize::new(0);
+    static KEY_MAIN: AtomicIsize = AtomicIsize::new(0);
+    /// A Windows key is held: every key goes to the session until it is released.
+    static WIN_HELD: AtomicBool = AtomicBool::new(false);
+
+    unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
+        let control = KEY_TARGET.load(Ordering::Relaxed) as HWND;
+        let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
+        if code == HC_ACTION as i32 && !control.is_null() && GetForegroundWindow() == main {
+            // The window inside the control that has the keyboard (its input window).
+            let thread = GetWindowThreadProcessId(main, std::ptr::null_mut());
+            let mut info: GUITHREADINFO = std::mem::zeroed();
+            info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+            let focus = if GetGUIThreadInfo(thread, &mut info) != 0 { info.hwndFocus } else { std::ptr::null_mut() };
+            let k = &*(lparam as *const KBDLLHOOKSTRUCT);
+            if !focus.is_null() && IsChild(control, focus) != 0 {
+                let up = wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize;
+                let vk = k.vkCode as u16;
+                let win_key = vk == VK_LWIN || vk == VK_RWIN;
+                let held = WIN_HELD.load(Ordering::Relaxed);
+                if win_key {
+                    WIN_HELD.store(!up, Ordering::Relaxed);
+                }
+                let alt = k.flags & LLKHF_ALTDOWN != 0;
+                let ctrl = GetAsyncKeyState(VK_CONTROL as i32) < 0;
+                if win_key || held || (alt && matches!(vk, VK_TAB | VK_ESCAPE | VK_SPACE)) || (ctrl && vk == VK_ESCAPE) {
+                    // The message a keyboard would have produced: repeat count, scan code, flags.
+                    let mut l = 1 | ((k.scanCode & 0xFF) << 16);
+                    if k.flags & LLKHF_EXTENDED != 0 {
+                        l |= 1 << 24;
+                    }
+                    if alt {
+                        l |= 1 << 29;
+                    }
+                    if up {
+                        l |= (1 << 30) | (1 << 31);
+                    }
+                    PostMessageW(focus, wparam as u32, vk as usize, l as isize);
+                    return 1;
+                }
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
     }
 
     fn class_name(w: HWND) -> String {
@@ -688,6 +738,38 @@ mod imp {
                 }
             }
             unsafe { SetFocus(target) };
+        }
+
+        /// Sends key combinations (Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+Space) to the
+        /// Remote Desktop control in `win` while it has the keyboard, instead of to Windows –
+        /// what the control's own keyboard hook does in mstsc, which does not work when it is
+        /// hosted here. `None` leaves them to Windows again.
+        pub fn forward_keys(&self, win: Option<WinId>) {
+            let control = win.map(hwnd).filter(|w| class_name(*w).starts_with("AtlAxWin"));
+            KEY_MAIN.store(self.main as isize, Ordering::Relaxed);
+            KEY_TARGET.store(control.map_or(0, |w| w as isize), Ordering::Relaxed);
+            if control.is_some() {
+                static HOOK: std::sync::Once = std::sync::Once::new();
+                // A thread of its own with a message loop, so the hook never waits for a frame.
+                HOOK.call_once(|| {
+                    std::thread::spawn(|| unsafe {
+                        let mut hook: HHOOK = std::ptr::null_mut();
+                        SetTimer(std::ptr::null_mut(), 0, 500, None);
+                        let mut msg: MSG = std::mem::zeroed();
+                        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                            // Low-level hooks run newest first, and the control installs one of
+                            // its own that keeps the keys local here: renew ours to stay ahead.
+                            if msg.message == WM_TIMER && (hook.is_null() || KEY_TARGET.load(Ordering::Relaxed) != 0) {
+                                if !hook.is_null() {
+                                    UnhookWindowsHookEx(hook);
+                                }
+                                hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0);
+                            }
+                            DispatchMessageW(&msg);
+                        }
+                    });
+                });
+            }
         }
 
         /// Whether RC Manager's window is the foreground window (embedded clients are children

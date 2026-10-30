@@ -20,6 +20,8 @@ then keeps the active sessions and a counter of new warnings visible.
 | Folder tree, search, sort order | ✔ | ✔ |
 | Sessions as tabs, scaled with the window | ✔ | ✔ (Linux: X11/XWayland) |
 | RDP | embedded MSTSC ActiveX | Linux: FreeRDP 3 drawn into the tab; Windows: the MSTSC ActiveX control (FreeRDP optional); remote resolution follows the tab or the desktop is scaled |
+| RDP options | display, experience, sound, key combinations, redirections, NLA, server authentication, TS gateway, start program, keyboard layout | the same (ports and Plug and Play devices only with the Windows RDP client); RemoteApp in addition |
+| Group settings (shared settings for many connections) | ✔ | ✔ settings profiles for RDP, SSH and VNC (*Edit → Settings Profiles …*): a connection uses its own settings, a profile, or the profile of its folder (inherited by sub-folders) |
 | Unlock a locked RDP session | ✔ (send password) | ✔ (*Unlock* types the stored password, no reconnect) |
 | SSH | embedded PuTTY | Linux: `ssh` in an xterm inside the tab, password via `sshpass`; Windows: PuTTY inside the tab |
 | VNC | UltraVNC/TightVNC | TigerVNC `vncviewer`, its window moved into the tab |
@@ -126,8 +128,12 @@ next to `rc-manager.exe`:
 
 Sessions open as tabs like on Linux. RDP tabs use the Remote Desktop client built into Windows –
 the ActiveX control of mstsc.exe, as in the original – hosted in RC Manager's window: it draws
-with the GPU and shows its own certificate and logon dialogs. *Options → Windows RDP Client in
-Tabs* switches to FreeRDP (`wfreerdp`) instead, which is also used for RemoteApp and when the
+with the GPU and shows its own certificate and logon dialogs. With *Key combinations: On the
+remote computer* (default) the Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+Space go to the
+session while it has the keyboard; RC Manager forwards them itself, since the control's own
+keyboard hook does not work when it is embedded. *Options → Windows RDP Client in
+Tabs* switches to FreeRDP (`wfreerdp`) instead (per connection or settings profile: *Advanced →
+RDP client*), which is also used for RemoteApp and when the
 control is not available. PuTTY's and TigerVNC's windows are moved into the tab (their title bar
 and frame lie outside the tab, as in the original). The installed version stores its data in
 `%APPDATA%\rc-manager`. FreeRDP's Windows client is built from source with a small patch
@@ -213,8 +219,12 @@ rc-manager --import ~/RDP_Manager_2026.04.22.zip [--app-password SECRET]
 ```
 
 Imported are folders, connections (RDP, PuTTY → SSH, VNC, web, external programs),
-credentials including passwords, as well as port, resolution, colour depth, redirections and
-gateway from the settings – also when they are inherited from folders. Deleted entries (recycle
+credentials including passwords, as well as the RDP settings (port, resolution, colour depth,
+experience, sound, key combinations, redirections, NLA, gateway, start program) – also when they
+are inherited from folders. Group settings become settings profiles, assigned to the same
+folders and connections as in the original. Own gateway credentials become a credential set. Server
+authentication is taken over only as "warn" or "do not connect", never as "connect without
+warning". Deleted entries (recycle
 bin) are skipped. From a backup the import dialog shows version, date and comment, and the
 layout of the connection tree (auto-hide or docked) is taken over for the sidebar. Backups of
 installations that used a database server instead of SQLite cannot be imported.
