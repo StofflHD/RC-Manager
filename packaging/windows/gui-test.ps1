@@ -30,8 +30,14 @@ public static class U {
   public static bool Hook() { keep = (c, w, l) => { Seen++; return CallNextHookEx(IntPtr.Zero, c, w, l); };
     return SetWindowsHookEx(13, keep, GetModuleHandle(null), 0) != IntPtr.Zero; }
   // Win+R as a keyboard would send it.
-  public static void WinR() { keybd_event(0x5B, 0, 1, IntPtr.Zero); keybd_event(0x52, 0, 0, IntPtr.Zero);
-    keybd_event(0x52, 0, 2, IntPtr.Zero); keybd_event(0x5B, 0, 3, IntPtr.Zero); }
+  [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public IntPtr extra; }
+  [StructLayout(LayoutKind.Explicit, Size = 40)] struct INPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KEYBDINPUT k; }
+  [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
+  static INPUT Key(ushort vk, ushort scan, uint flags) { var i = new INPUT(); i.type = 1; i.k.vk = vk; i.k.scan = scan; i.k.flags = flags; return i; }
+  public static uint WinR() {
+    var keys = new[] { Key(0x5B, 0x5B, 1), Key(0x52, 0x13, 0), Key(0x52, 0x13, 2), Key(0x5B, 0x5B, 3) };
+    return SendInput((uint)keys.Length, keys, Marshal.SizeOf(typeof(INPUT)));
+  }
   [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] static extern IntPtr GetWindowLongPtrW(IntPtr h, int i);
   public static long GetStyle(IntPtr h) { return (long)GetWindowLongPtrW(h, -16); }
   public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2, 0, 0, 0, IntPtr.Zero); mouse_event(4, 0, 0, 0, IntPtr.Zero); }
@@ -152,7 +158,7 @@ $hooked = [U]::Hook()
 for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
 "Hook in the test process: installed $hooked, keys seen $([U]::Seen)" | Out-File -Append $info
 "Foreground before Win+R: $([U]::GetForegroundWindow()) (RC Manager $($p.MainWindowHandle))" | Out-File -Append $info
-[U]::WinR()
+"SendInput Win+R: $([U]::WinR()) events" | Out-File -Append $info
 for ($i = 0; $i -lt 80; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
 "Hook in the test process after Win+R: keys seen $([U]::Seen)" | Out-File -Append $info
 Shot '1c-win-r'
