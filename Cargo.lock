@@ -2840,6 +2840,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "libc",
  "md-5",
  "rand",
  "raw-window-handle",

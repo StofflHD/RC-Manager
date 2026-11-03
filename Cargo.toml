@@ -63,6 +63,10 @@ x11rb = { version = "0.13", features = ["res", "shape", "xtest"] }
 # For EventLoopBuilderExtX11: RC Manager runs on X11/XWayland so that sessions can be embedded.
 winit = { version = "0.30", default-features = false, features = ["x11", "wayland"] }
 
+[target.'cfg(unix)'.dependencies]
+# Closing inherited descriptors before the restart after an update (see update.rs).
+libc = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = true

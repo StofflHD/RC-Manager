@@ -327,18 +327,61 @@ pub fn finish_on_exit(installed: &Path, restart: bool) {
 /// Starts `exe` once this process has exited (used for "restart after update").
 fn restart_when_exited(exe: &Path) {
     let pid = std::process::id().to_string();
-    let _ = Command::new("sh")
-        .args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "sh", &pid])
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; exec \"$2\"", "sh", &pid])
         .arg(exe)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    without_inherited_fds(&mut cmd);
+    let _ = cmd.spawn();
+}
+
+/// Makes `cmd` start without the open descriptors of this process (except stdin/out/err). The
+/// AppImage runtime of the running version keeps its mount, and with it the replaced file, until
+/// every process holding one of its descriptors has exited; handed down to the restarted app,
+/// they would keep the old version running in the background.
+#[cfg(unix)]
+fn without_inherited_fds(cmd: &mut Command) -> &mut Command {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: only async-signal-safe calls (close_range, close) run between fork and exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            #[cfg(target_os = "linux")]
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) == 0 {
+                return Ok(());
+            }
+            for fd in 3..1024 {
+                libc::close(fd);
+            }
+            Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_hands_down_no_descriptors() {
+        // A descriptor without close-on-exec, like the keep-alive pipe of the AppImage runtime.
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let open_in_child = |cmd: &mut Command| -> Vec<i32> {
+            let out = cmd.args(["-c", "ls /proc/$$/fd"]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).split_whitespace().filter_map(|s| s.parse().ok()).collect()
+        };
+        assert!(open_in_child(&mut Command::new("sh")).contains(&fds[0]), "a plain child inherits the pipe");
+        let clean = open_in_child(without_inherited_fds(&mut Command::new("sh")));
+        assert!(!clean.contains(&fds[0]) && !clean.contains(&fds[1]), "{clean:?}");
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+    }
 
     #[test]
     fn versions() {
