@@ -8,8 +8,9 @@ your browser – embedded as tabs in RC Manager's window.
 Look and feel (the "Rust" colour scheme with light and dark theme, icon style) match
 [notepad-rs](https://github.com/StofflHD/notepad-rs) and the
 [IP Calculator](https://github.com/StofflHD/IP-Calculator). Switch themes via *Options → Dark Theme*. The connection sidebar collapses to a narrow strip
-(« button, *Options → Show Sidebar* or Ctrl+B); hovering the strip shows the sidebar as an
-overlay that hides again when the mouse leaves, a click on the strip (or 📌) docks it again.
+(« button, *Options → Show Sidebar* or Ctrl+B); hovering its caption "Connections" shows the
+sidebar as an overlay that hides again when the mouse leaves, a click on the caption (or 📌)
+docks it again.
 The log at the bottom can be hidden (▼ button, *Options → Show Log* or Ctrl+L); a status line
 then keeps the active sessions and a counter of new warnings visible.
 
