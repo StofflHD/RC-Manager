@@ -259,20 +259,23 @@ impl App {
             return;
         }
 
-        // Narrow strip with a vertical caption. Hovering it shows the sidebar as an overlay,
-        // clicking it (or the pin in the overlay) docks the sidebar again.
+        // Narrow strip with a vertical caption. Hovering the caption (not the empty strip below
+        // it, as in the original) shows the sidebar as an overlay, clicking it (or the pin in the
+        // overlay) docks the sidebar again.
         let strip = egui::SidePanel::left("tree_collapsed").resizable(false).exact_width(28.0).show(ctx, |ui| {
             let rect = ui.max_rect().expand2(egui::vec2(8.0, 0.0));
-            let resp = ui.interact(rect, ui.id().with("expand"), egui::Sense::click());
-            let visuals = ui.visuals();
+            let visuals = ui.visuals().clone();
+            let caption = |color| ui.painter().layout_no_wrap("Connections".into(), egui::FontId::proportional(14.0), color);
+            let hot = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.top() + 42.0 + caption(visuals.text_color()).size().x));
+            let resp = ui.interact(hot, ui.id().with("expand"), egui::Sense::click());
             let active = resp.hovered() || self.sidebar_peek;
             let color = if active { visuals.strong_text_color() } else { visuals.text_color() };
             if active {
-                ui.painter().rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
+                ui.painter().rect_filled(hot, 0.0, visuals.widgets.hovered.weak_bg_fill);
             }
             let x = rect.center().x;
             ui.painter().text(egui::pos2(x, rect.top() + 16.0), Align2::CENTER_CENTER, "»", egui::FontId::proportional(18.0), color);
-            let galley = ui.painter().layout_no_wrap("Connections".into(), egui::FontId::proportional(14.0), color);
+            let galley = caption(color);
             // Rotated 90° clockwise: the text runs top to bottom, its height extends to the left of `pos`.
             let pos = egui::pos2(x + galley.size().y / 2.0, rect.top() + 34.0);
             ui.painter().add(egui::epaint::TextShape::new(pos, galley, color).with_angle(std::f32::consts::FRAC_PI_2));
@@ -283,13 +286,13 @@ impl App {
             if resp.hovered() {
                 self.sidebar_peek = true;
             }
-            rect
+            (rect, hot)
         });
         if !self.s.sidebar_collapsed || !self.sidebar_peek {
             return;
         }
 
-        let strip_rect = strip.inner;
+        let (strip_rect, caption_rect) = strip.inner;
         let width = 320.0;
         let area = egui::Area::new(egui::Id::new("tree_peek"))
             .order(egui::Order::Foreground)
@@ -307,7 +310,7 @@ impl App {
         // its menus (context menu, combo box); hide it as soon as the pointer moves away.
         let overlay_rect = area.response.rect;
         let keep = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
-            strip_rect.contains(p)
+            caption_rect.contains(p)
                 || overlay_rect.contains(p)
                 || ctx.layer_id_at(p).is_some_and(|l| l.order == egui::Order::Foreground && l.id != area.response.layer_id.id)
         });
