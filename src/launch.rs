@@ -1428,9 +1428,26 @@ mod tests {
         for o in ["KexAlgorithms=+", "diffie-hellman-group14-sha1", "HostKeyAlgorithms=+ssh-rsa"] {
             assert!(legacy.args.iter().any(|a| a.contains(o)), "missing {o} in {:?}", legacy.args);
         }
-        // Never name an algorithm the client dropped: `+ssh-dss` (gone in OpenSSH 10) aborts ssh
-        // with "Bad key types" before it connects.
-        assert!(!legacy.args.iter().any(|a| a.contains("ssh-dss")), "ssh-dss must be filtered out: {:?}", legacy.args);
+        // Never name an algorithm the local client dropped: a `+` list with an unknown algorithm
+        // (e.g. ssh-dss, gone in OpenSSH 10) aborts ssh with "Bad key types" before it connects.
+        // So every algorithm we emit must appear in this machine's `ssh -Q` — which is exactly what
+        // keeps the result correct on both old CI runners (ssh-dss still known) and OpenSSH 10.
+        for (name, query) in [
+            ("KexAlgorithms", "kex"),
+            ("HostKeyAlgorithms", "key"),
+            ("PubkeyAcceptedAlgorithms", "key"),
+            ("Ciphers", "cipher"),
+            ("MACs", "mac"),
+        ] {
+            let known = ssh_query(query);
+            // Find the `NAME=+a,b,c` argument and check each listed algorithm is known locally.
+            let list = legacy.args.iter().find_map(|a| a.strip_prefix(&format!("{name}=+")));
+            if let Some(list) = list {
+                for alg in list.split(',') {
+                    assert!(known.iter().any(|k| k == alg), "{name} names unknown algorithm {alg}; local ssh -Q {query}: {known:?}");
+                }
+            }
+        }
     }
 
     #[test]
