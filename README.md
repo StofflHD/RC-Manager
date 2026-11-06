@@ -103,6 +103,15 @@ in separate windows), which every desktop has. It needs glibc ≥ 2.35 (Ubuntu 2
 If a bundled client cannot run on a system, RC Manager uses the installed one instead;
 `rc-manager --tools` (or *Options → External Programs*) shows which clients are used.
 
+### Application menu
+
+On the first start from the AppImage, RC Manager offers to add itself to the application menu:
+the AppImage is moved to `~/Applications`, and a desktop entry and icon are created, so RC Manager
+appears in the start menu (no root rights; updates keep working). Later: *Help → Add to
+Application Menu …* / *Help → Remove from Application Menu …* (removes entry, icon and the
+AppImage in `~/Applications`; settings and connections are kept). The entry follows when the
+AppImage is moved, renamed or updated.
+
 ### Updates
 
 RC Manager checks the GitHub releases at start (at most once a day; *Help → Check for Updates
@@ -296,6 +305,7 @@ src/rdpax.rs           Windows: RDP with the Remote Desktop ActiveX control (mst
 src/net.rs             Wake-on-LAN, port check
 src/update.rs          updater (GitHub releases, SHA-256 check, replaces the AppImage or the
                        Windows installation)
+src/install.rs         Linux: application menu entry (desktop entry + icon, ~/Applications)
 src/legacy/crypto.rs   .NET PasswordDeriveBytes + AES (passwords of the original)
 src/legacy/nrbf.rs     reader for .NET BinaryFormatter blobs (settings of the original)
 src/legacy/import.rs   import of the Windows database

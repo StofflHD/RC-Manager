@@ -46,6 +46,8 @@ struct Settings {
     update_last_check: i64,
     /// Version the user chose to skip.
     update_skip: String,
+    /// Offer "Add to Application Menu" when started from an AppImage that is not installed.
+    install_prompt: bool,
     /// Connections whose sessions were open at the last exit, offered for reopening at start.
     reopen: Vec<Uuid>,
 }
@@ -64,6 +66,7 @@ impl Default for Settings {
             update_proxy: String::new(),
             update_last_check: 0,
             update_skip: String::new(),
+            install_prompt: true,
             reopen: Vec::new(),
         }
     }
@@ -199,6 +202,16 @@ struct UpdateDlg {
     state: UpdateState,
     /// Opened from the menu (an automatic check only shows a found update).
     manual: bool,
+}
+
+/// "Add to Application Menu" / "Remove from Application Menu" (Linux).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum InstallDlg {
+    /// `first`: offered automatically at start (with "Don't Ask Again").
+    Ask { first: bool },
+    ConfirmRemove,
+    Done(String),
+    Error(String),
 }
 
 /// "HH:MM:SS UTC" of now.
@@ -450,6 +463,9 @@ pub struct App {
     pending_update: Option<PathBuf>,
     /// AppImage to start once RC Manager has exited (restart after an update).
     restart_exe: Option<PathBuf>,
+    /// "Add to / Remove from Application Menu" dialog (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    install_dlg: Option<InstallDlg>,
     /// Running reachability check (dialog).
     reach: Option<Reachability>,
     /// Central area of the active session tab (points), set while drawing.
@@ -658,6 +674,7 @@ impl App {
             update: None,
             update_proxy_edit: None,
             restart_exe: None,
+            install_dlg: None,
             pending_update: None,
             reach: None,
             session_rect: None,
@@ -711,6 +728,16 @@ impl App {
         let freerdp_config = app.store.dir().join("freerdp");
         std::fs::remove_dir_all(&freerdp_config).ok();
         app.tools.freerdp_config = Some(freerdp_config);
+        #[cfg(target_os = "linux")]
+        if let Some(exe) = crate::update::update_target() {
+            // The AppImage may have been moved or renamed: keep the menu entry pointing at it.
+            let e = exe.clone();
+            std::thread::spawn(move || crate::install::refresh_exec(&crate::install::Dirs::user(), &e));
+            // First start from an AppImage that is not in the application menu yet.
+            if app.s.install_prompt && !crate::install::is_installed(&crate::install::Dirs::user()) {
+                app.install_dlg = Some(InstallDlg::Ask { first: true });
+            }
+        }
         // Automatic update check (at most once a day, in the background).
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         if app.s.update_auto_check && std::env::var_os("RC_MANAGER_NO_UPDATE").is_none() && now - app.s.update_last_check >= 86_400 {
@@ -2198,6 +2225,8 @@ impl eframe::App for App {
         self.ui_reachability(ctx);
         self.poll_update();
         self.ui_update(ctx);
+        #[cfg(target_os = "linux")]
+        self.ui_install(ctx);
         self.ui_dialogs(ctx);
         for a in actions {
             self.apply(a);

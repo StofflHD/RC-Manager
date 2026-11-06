@@ -7,6 +7,8 @@
 
 mod app;
 mod embed;
+#[cfg(target_os = "linux")]
+mod install;
 mod launch;
 mod legacy;
 mod model;

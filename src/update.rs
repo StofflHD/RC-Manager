@@ -303,7 +303,13 @@ fn install_windows(rel: &Release, exe: &Path, proxy: &str) -> Result<PathBuf, St
 
 pub fn spawn_install(rel: Release, target: PathBuf, proxy: String, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
-        let _ = tx.send(Msg::Installed(install(&rel, &target, &proxy)));
+        let result = install(&rel, &target, &proxy);
+        #[cfg(target_os = "linux")]
+        if let Ok(dest) = &result {
+            // Keep the application menu entry pointing at the (possibly renamed) AppImage.
+            crate::install::refresh_exec(&crate::install::Dirs::user(), dest);
+        }
+        let _ = tx.send(Msg::Installed(result));
         wake();
     });
 }

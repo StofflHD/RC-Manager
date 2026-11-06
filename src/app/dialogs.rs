@@ -246,6 +246,84 @@ impl App {
         }
     }
 
+    /// "Add to / Remove from Application Menu" (Linux, AppImage).
+    #[cfg(target_os = "linux")]
+    pub(super) fn ui_install(&mut self, ctx: &egui::Context) {
+        use crate::install;
+        let Some(dlg) = self.install_dlg.take() else { return };
+        let mut open = true;
+        let mut next: Option<Option<InstallDlg>> = None; // Some(None) = close
+        let apps = install::apps_dir();
+        Self::modal("Application Menu").open(&mut open).show(ctx, |ui| {
+            ui.set_max_width(440.0);
+            match &dlg {
+                InstallDlg::Ask { first } => {
+                    ui.label(RichText::new("Add RC Manager to the application menu?").strong());
+                    ui.label(format!("The AppImage is moved to {} and RC Manager appears in the start menu. Updates keep working.", install::tilde(&apps)));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Add to Menu").clicked() {
+                            let dirs = install::Dirs::user();
+                            let r = crate::update::update_target().ok_or_else(|| "Not started from an AppImage.".to_string()).and_then(|a| install::install(&dirs, &a, &apps));
+                            next = Some(Some(match r {
+                                Ok(dest) => {
+                                    // The updater uses the new location.
+                                    std::env::set_var("APPIMAGE", &dest);
+                                    InstallDlg::Done(format!("RC Manager is now in the application menu.\nAppImage: {}", install::tilde(&dest)))
+                                }
+                                Err(e) => InstallDlg::Error(e),
+                            }));
+                        }
+                        if ui.button("Not Now").clicked() {
+                            next = Some(None);
+                        }
+                        if *first && ui.button("Don't Ask Again").clicked() {
+                            self.s.install_prompt = false;
+                            next = Some(None);
+                        }
+                    });
+                    if *first {
+                        ui.label(RichText::new("Also available later under Help → Add to Application Menu.").weak());
+                    }
+                }
+                InstallDlg::ConfirmRemove => {
+                    ui.label(RichText::new("Remove RC Manager from the application menu?").strong());
+                    ui.label(format!("Removes the start menu entry and the icon and deletes the AppImage in {}. Your settings and connections are kept.", install::tilde(&apps)));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Remove").clicked() {
+                            let dirs = install::Dirs::user();
+                            let appimage = crate::update::update_target();
+                            next = Some(Some(match install::uninstall(&dirs, appimage.as_deref(), &apps) {
+                                Ok(()) => InstallDlg::Done("RC Manager has been removed from the application menu. This window keeps working until you close it.".into()),
+                                Err(e) => InstallDlg::Error(e),
+                            }));
+                        }
+                        if ui.button("Cancel").clicked() {
+                            next = Some(None);
+                        }
+                    });
+                }
+                InstallDlg::Done(msg) | InstallDlg::Error(msg) => {
+                    if matches!(dlg, InstallDlg::Error(_)) {
+                        ui.label(RichText::new("That didn't work:").strong());
+                    }
+                    ui.label(msg);
+                    if ui.button("OK").clicked() {
+                        next = Some(None);
+                    }
+                }
+            }
+        });
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            return;
+        }
+        self.install_dlg = match next {
+            Some(n) => n,
+            None => Some(dlg),
+        };
+    }
+
     pub(super) fn modal(title: &str) -> egui::Window<'_> {
         egui::Window::new(title).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, [0.0, 0.0])
     }

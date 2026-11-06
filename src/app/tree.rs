@@ -94,6 +94,19 @@ impl App {
                         self.update_proxy_edit = Some(self.s.update_proxy.clone());
                         ui.close_menu();
                     }
+                    #[cfg(target_os = "linux")]
+                    {
+                        ui.separator();
+                        if crate::install::is_installed(&crate::install::Dirs::user()) {
+                            if ui.button("Remove from Application Menu …").clicked() {
+                                self.install_dlg = Some(InstallDlg::ConfirmRemove);
+                                ui.close_menu();
+                            }
+                        } else if crate::update::update_target().is_some() && ui.button("Add to Application Menu …").clicked() {
+                            self.install_dlg = Some(InstallDlg::Ask { first: false });
+                            ui.close_menu();
+                        }
+                    }
                     ui.separator();
                     if ui.button("About RC Manager").clicked() {
                         self.show_about = true;
