@@ -345,20 +345,46 @@ fn split_extra(s: &str) -> Result<Vec<String>> {
 }
 
 /// `-o` options that re-enable the old crypto modern OpenSSH disables by default, so a legacy
-/// server (sha1 key exchange, ssh-rsa/ssh-dss host keys, CBC ciphers) can still be reached. The
-/// leading `+` appends them to the built-in defaults, so modern servers keep negotiating their
-/// strong algorithms first.
+/// server (sha1 key exchange, ssh-rsa host keys, CBC ciphers) can still be reached. The leading
+/// `+` appends them to the built-in defaults, so modern servers keep negotiating their strong
+/// algorithms first.
+///
+/// Every algorithm is first checked against what the local `ssh` still knows (`ssh -Q`): with the
+/// `+` syntax, naming even one algorithm the client no longer supports (e.g. `ssh-dss`, dropped in
+/// OpenSSH 10) makes ssh abort with "Bad key types" before it even connects, which would break the
+/// whole option on newer systems.
 fn legacy_ssh_args() -> Vec<String> {
-    [
-        "KexAlgorithms=+diffie-hellman-group-exchange-sha1,diffie-hellman-group14-sha1,diffie-hellman-group1-sha1",
-        "HostKeyAlgorithms=+ssh-rsa,ssh-dss",
-        "PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-dss",
-        "Ciphers=+aes256-cbc,aes128-cbc,3des-cbc",
-        "MACs=+hmac-sha1,hmac-sha1-96",
-    ]
-    .iter()
-    .flat_map(|o| ["-o".to_string(), (*o).to_string()])
-    .collect()
+    // (option name, `ssh -Q` query, candidate algorithms oldest servers still offer)
+    let categories: [(&str, &str, &[&str]); 5] = [
+        ("KexAlgorithms", "kex", &["diffie-hellman-group-exchange-sha1", "diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1"]),
+        ("HostKeyAlgorithms", "key", &["ssh-rsa", "ssh-dss"]),
+        ("PubkeyAcceptedAlgorithms", "key", &["ssh-rsa", "ssh-dss"]),
+        ("Ciphers", "cipher", &["aes256-cbc", "aes128-cbc", "3des-cbc"]),
+        ("MACs", "mac", &["hmac-sha1", "hmac-sha1-96"]),
+    ];
+    let mut args = Vec::new();
+    for (name, query, candidates) in categories {
+        let have = ssh_query(query);
+        let want: Vec<&str> = candidates.iter().copied().filter(|c| have.iter().any(|h| h == c)).collect();
+        if !want.is_empty() {
+            args.push("-o".to_string());
+            args.push(format!("{name}=+{}", want.join(",")));
+        }
+    }
+    args
+}
+
+/// The algorithms the local `ssh` supports for one `ssh -Q` query (e.g. `kex`, `cipher`), one per
+/// line. Empty if ssh cannot be run or does not know the query.
+fn ssh_query(query: &str) -> Vec<String> {
+    std::process::Command::new("ssh")
+        .arg("-Q")
+        .arg(query)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(|l| l.trim().to_string()).collect())
+        .unwrap_or_default()
 }
 
 /// Host names end up as program arguments (and in `{T}` of external commands), so only
@@ -1395,11 +1421,32 @@ mod tests {
         // Off by default: no legacy `-o` options are added.
         let plain = plan(&c, None, &tools(3), Some(&e), None).unwrap();
         assert!(!plain.args.iter().any(|a| a.contains("KexAlgorithms")), "{:?}", plain.args);
-        // On: key exchange, host key, pubkey, cipher and MAC options are all appended with `+`.
+        // On: key exchange and host-key options are appended with `+` (filtered to what the local
+        // ssh still knows — ssh-rsa and group14-sha1 exist in every OpenSSH).
         c.options.ssh.allow_legacy = true;
         let legacy = plan(&c, None, &tools(3), Some(&e), None).unwrap();
-        for o in ["KexAlgorithms=+", "diffie-hellman-group14-sha1", "HostKeyAlgorithms=+ssh-rsa", "Ciphers=+aes256-cbc", "MACs=+hmac-sha1"] {
+        for o in ["KexAlgorithms=+", "diffie-hellman-group14-sha1", "HostKeyAlgorithms=+ssh-rsa"] {
             assert!(legacy.args.iter().any(|a| a.contains(o)), "missing {o} in {:?}", legacy.args);
+        }
+        // Never name an algorithm the local client dropped: a `+` list with an unknown algorithm
+        // (e.g. ssh-dss, gone in OpenSSH 10) aborts ssh with "Bad key types" before it connects.
+        // So every algorithm we emit must appear in this machine's `ssh -Q` — which is exactly what
+        // keeps the result correct on both old CI runners (ssh-dss still known) and OpenSSH 10.
+        for (name, query) in [
+            ("KexAlgorithms", "kex"),
+            ("HostKeyAlgorithms", "key"),
+            ("PubkeyAcceptedAlgorithms", "key"),
+            ("Ciphers", "cipher"),
+            ("MACs", "mac"),
+        ] {
+            let known = ssh_query(query);
+            // Find the `NAME=+a,b,c` argument and check each listed algorithm is known locally.
+            let list = legacy.args.iter().find_map(|a| a.strip_prefix(&format!("{name}=+")));
+            if let Some(list) = list {
+                for alg in list.split(',') {
+                    assert!(known.iter().any(|k| k == alg), "{name} names unknown algorithm {alg}; local ssh -Q {query}: {known:?}");
+                }
+            }
         }
     }
 
