@@ -344,6 +344,23 @@ fn split_extra(s: &str) -> Result<Vec<String>> {
     shell_words::split(s).map_err(|e| anyhow!("Invalid extra arguments: {e}"))
 }
 
+/// `-o` options that re-enable the old crypto modern OpenSSH disables by default, so a legacy
+/// server (sha1 key exchange, ssh-rsa/ssh-dss host keys, CBC ciphers) can still be reached. The
+/// leading `+` appends them to the built-in defaults, so modern servers keep negotiating their
+/// strong algorithms first.
+fn legacy_ssh_args() -> Vec<String> {
+    [
+        "KexAlgorithms=+diffie-hellman-group-exchange-sha1,diffie-hellman-group14-sha1,diffie-hellman-group1-sha1",
+        "HostKeyAlgorithms=+ssh-rsa,ssh-dss",
+        "PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-dss",
+        "Ciphers=+aes256-cbc,aes128-cbc,3des-cbc",
+        "MACs=+hmac-sha1,hmac-sha1-96",
+    ]
+    .iter()
+    .flat_map(|o| ["-o".to_string(), (*o).to_string()])
+    .collect()
+}
+
 /// Host names end up as program arguments (and in `{T}` of external commands), so only
 /// characters that can occur in DNS names and IPv4/IPv6 literals are allowed. A leading `-`
 /// would be read as an option by ssh or vncviewer.
@@ -815,6 +832,9 @@ fn plan_terminal(conn: &Connection, cred: Option<&Credential>, tools: &Tools, em
     }
     if !o.identity_file.trim().is_empty() {
         cmd.extend(["-i".into(), o.identity_file.trim().into()]);
+    }
+    if o.allow_legacy {
+        cmd.extend(legacy_ssh_args());
     }
     cmd.extend(split_extra(&o.extra_args)?);
     // `--` ends option parsing, so the host can never be taken for an option.
@@ -1365,6 +1385,22 @@ mod tests {
         assert_eq!(&p.args[pos + 3..], ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", "2222", "-l", "admin", "--", "box"]);
         assert_eq!(p.secret_files.len(), 1);
         assert!(!p.args.iter().any(|a| a.contains("pa ss")));
+    }
+
+    #[test]
+    fn ssh_legacy_algorithms_opt_in() {
+        let e = EmbedTarget { host: 4242, width: 1000, height: 700, dark: true };
+        let mut c = Connection::new("Old", Protocol::Ssh, None);
+        c.host = "box".into();
+        // Off by default: no legacy `-o` options are added.
+        let plain = plan(&c, None, &tools(3), Some(&e), None).unwrap();
+        assert!(!plain.args.iter().any(|a| a.contains("KexAlgorithms")), "{:?}", plain.args);
+        // On: key exchange, host key, pubkey, cipher and MAC options are all appended with `+`.
+        c.options.ssh.allow_legacy = true;
+        let legacy = plan(&c, None, &tools(3), Some(&e), None).unwrap();
+        for o in ["KexAlgorithms=+", "diffie-hellman-group14-sha1", "HostKeyAlgorithms=+ssh-rsa", "Ciphers=+aes256-cbc", "MACs=+hmac-sha1"] {
+            assert!(legacy.args.iter().any(|a| a.contains(o)), "missing {o} in {:?}", legacy.args);
+        }
     }
 
     #[test]
