@@ -1234,7 +1234,13 @@ impl App {
         // Size of the session area: the last one drawn, or the central panel's.
         let ppp = self.ctx.pixels_per_point();
         let rect = self.session_rect.unwrap_or_else(|| self.ctx.available_rect());
-        Some(EmbedTarget { host, width: (rect.width() * ppp) as u32, height: (rect.height() * ppp) as u32, dark: self.s.dark })
+        let (width, height) = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
+        // Size the host to the tab area *before* the client starts: an embedded terminal (xterm)
+        // then opens at the right number of rows/columns at once, instead of the 64×64 default.
+        // A remote pager reads the terminal size only at login, so a late resize would leave it
+        // scrolling one line at a time.
+        let _ = emb.resize_host(host, width, height);
+        Some(EmbedTarget { host, width, height, dark: self.s.dark })
     }
 
     fn launch(&mut self, conn: &Connection, cred: Option<&Credential>) {

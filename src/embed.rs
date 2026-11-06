@@ -84,6 +84,16 @@ mod imp {
             Ok(id)
         }
 
+        /// Sizes a host window to the session area *before* its client starts, so a terminal
+        /// (xterm) opens at the right row/column count straight away instead of the 64×64 default.
+        /// A remote pager (e.g. Cisco `--More--`) reads the terminal size once at login, so a
+        /// too-small window there makes it scroll one line at a time.
+        pub fn resize_host(&self, host: WinId, w: u32, h: u32) -> Result<()> {
+            self.conn.configure_window(host, &ConfigureWindowAux::new().width(w.max(1)).height(h.max(1)))?;
+            self.conn.flush()?;
+            Ok(())
+        }
+
         /// Moves/resizes the host (physical pixels, relative to RC Manager's window) and
         /// makes every client window inside fill it. `holes` (relative to the host) are cut
         /// out of it, so RC Manager's own content shows (and gets the clicks) there.
@@ -319,6 +329,9 @@ mod imp {
         }
         pub fn create_host(&self) -> Result<WinId> {
             unreachable!()
+        }
+        pub fn resize_host(&self, _host: WinId, _w: u32, _h: u32) -> Result<()> {
+            Ok(())
         }
         pub fn place(&self, _host: WinId, _x: i32, _y: i32, _w: WinId, _h: WinId, _visible: bool, _holes: &[[i32; 4]]) -> Result<()> {
             Ok(())
@@ -638,6 +651,15 @@ mod imp {
                 bail!("Cannot create a window for the session (error {})", std::io::Error::last_os_error());
             }
             Ok(id(h))
+        }
+
+        /// Sizes a host window to the session area before its client starts, so an embedded
+        /// terminal opens at the right size straight away instead of the 64×64 default.
+        pub fn resize_host(&self, host: WinId, w: u32, h: u32) -> Result<()> {
+            unsafe {
+                SetWindowPos(hwnd(host), HWND_TOP, 0, 0, w.max(1) as i32, h.max(1) as i32, SWP_NOACTIVATE);
+            }
+            Ok(())
         }
 
         /// Moves/resizes the host (physical pixels, relative to RC Manager's window) and makes
