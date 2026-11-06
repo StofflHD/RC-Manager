@@ -628,6 +628,8 @@ impl App {
                 ui.collapsing("SSH", |ui| {
                     ui.checkbox(&mut o.x11_forwarding, "X11 forwarding (-X)");
                     ui.checkbox(&mut o.compression, "Compression (-C)");
+                    ui.checkbox(&mut o.allow_legacy, "Allow legacy algorithms")
+                        .on_hover_text("Re-enable old crypto (sha1 key exchange, ssh-rsa host keys, CBC ciphers) for legacy servers.");
                     egui::Grid::new("ssh_grid").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
                         ui.label("Identity file");
                         ui.add(egui::TextEdit::singleline(&mut o.identity_file).hint_text("~/.ssh/id_ed25519").desired_width(240.0));

@@ -346,6 +346,9 @@ pub struct SshOptions {
     pub compression: bool,
     pub identity_file: String,
     pub remote_command: String,
+    /// Re-enable the old crypto (sha1 key exchange, ssh-rsa/ssh-dss host keys, CBC ciphers) that
+    /// modern OpenSSH refuses by default, so legacy servers stay reachable.
+    pub allow_legacy: bool,
     pub extra_args: String,
 }
 
