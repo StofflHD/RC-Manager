@@ -445,6 +445,22 @@ mod imp {
         *ON.get_or_init(|| std::env::var_os("RC_MANAGER_DEBUG_KEYS").is_some())
     }
 
+    /// "class, pid, owner" of a window, for the diagnostics.
+    unsafe fn describe(w: HWND) -> String {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(w, &mut pid);
+        let mut title = [0u16; 80];
+        let n = GetWindowTextW(w, title.as_mut_ptr(), title.len() as i32);
+        format!(
+            "{w:?} {} \"{}\" pid {pid}{} owner {:?} root {:?}",
+            class_name(w),
+            String::from_utf16_lossy(&title[..n.max(0) as usize]),
+            if pid == std::process::id() { " (RC Manager)" } else { "" },
+            GetWindow(w, GW_OWNER),
+            GetAncestor(w, GA_ROOT)
+        )
+    }
+
     /// A click into the control while another program is active.
     static CLICKED: AtomicBool = AtomicBool::new(false);
 
@@ -460,6 +476,9 @@ mod imp {
                     let m = &*(lparam as *const MSLLHOOKSTRUCT);
                     let w = WindowFromPoint(m.pt);
                     let hit = !w.is_null() && (w == control || IsChild(control, w) != 0);
+                    if debug_keys() {
+                        eprintln!("keys: button down on {}, in control {hit}, foreground {}", describe(w), describe(GetForegroundWindow()));
+                    }
                     CLICKED.store(hit && GetForegroundWindow() != main, Ordering::Relaxed);
                 }
                 // After the button is released the click has reached RC Manager, which may
@@ -489,12 +508,7 @@ mod imp {
         if debug_keys() && code == HC_ACTION as i32 && (control.is_null() || !ours || fg != main) {
             let k = &*(lparam as *const KBDLLHOOKSTRUCT);
             if matches!(k.vkCode as u16, VK_LWIN | VK_RWIN) {
-                eprintln!(
-                    "keys: vk {:X}: control {control:?}, foreground {fg:?} ({}, ours {ours}, root owner {:?}), RC Manager {main:?}",
-                    k.vkCode,
-                    class_name(fg),
-                    GetAncestor(fg, GA_ROOTOWNER)
-                );
+                eprintln!("keys: vk {:X} {wparam:X}: control {control:?}, RC Manager {main:?}, foreground {}", k.vkCode, describe(fg));
             }
         }
         if code == HC_ACTION as i32 && !control.is_null() && ours {
