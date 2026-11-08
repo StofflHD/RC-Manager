@@ -448,13 +448,25 @@ mod imp {
     unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
         let control = KEY_TARGET.load(Ordering::Relaxed) as HWND;
         let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
-        if debug_keys() && code == HC_ACTION as i32 && (control.is_null() || GetForegroundWindow() != main) {
+        // The foreground window can be another top-level window of RC Manager than its main
+        // window (seen with the Windows RDP control): what counts is that it belongs to this
+        // process and that the keyboard focus is inside the control.
+        let fg = GetForegroundWindow();
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, &mut pid);
+        let ours = !fg.is_null() && pid == std::process::id();
+        if debug_keys() && code == HC_ACTION as i32 && (control.is_null() || !ours || fg != main) {
             let k = &*(lparam as *const KBDLLHOOKSTRUCT);
             if matches!(k.vkCode as u16, VK_LWIN | VK_RWIN) {
-                eprintln!("keys: vk {:X} not forwarded: control {control:?}, foreground {:?}, RC Manager {main:?}", k.vkCode, GetForegroundWindow());
+                eprintln!(
+                    "keys: vk {:X}: control {control:?}, foreground {fg:?} ({}, ours {ours}, root owner {:?}), RC Manager {main:?}",
+                    k.vkCode,
+                    class_name(fg),
+                    GetAncestor(fg, GA_ROOTOWNER)
+                );
             }
         }
-        if code == HC_ACTION as i32 && !control.is_null() && GetForegroundWindow() == main {
+        if code == HC_ACTION as i32 && !control.is_null() && ours {
             // The window inside the control that has the keyboard (its input window).
             let thread = GetWindowThreadProcessId(main, std::ptr::null_mut());
             let mut info: GUITHREADINFO = std::mem::zeroed();
