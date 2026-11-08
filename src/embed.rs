@@ -438,9 +438,22 @@ mod imp {
     /// A Windows key is held: every key goes to the session until it is released.
     static WIN_HELD: AtomicBool = AtomicBool::new(false);
 
+    /// `RC_MANAGER_DEBUG_KEYS=1`: the key forwarding reports what it sees on stderr
+    /// (start with `rc-manager.exe 2> keys.log`).
+    fn debug_keys() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var_os("RC_MANAGER_DEBUG_KEYS").is_some())
+    }
+
     unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
         let control = KEY_TARGET.load(Ordering::Relaxed) as HWND;
         let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
+        if debug_keys() && code == HC_ACTION as i32 && (control.is_null() || GetForegroundWindow() != main) {
+            let k = &*(lparam as *const KBDLLHOOKSTRUCT);
+            if matches!(k.vkCode as u16, VK_LWIN | VK_RWIN) {
+                eprintln!("keys: vk {:X} not forwarded: control {control:?}, foreground {:?}, RC Manager {main:?}", k.vkCode, GetForegroundWindow());
+            }
+        }
         if code == HC_ACTION as i32 && !control.is_null() && GetForegroundWindow() == main {
             // The window inside the control that has the keyboard (its input window).
             let thread = GetWindowThreadProcessId(main, std::ptr::null_mut());
@@ -448,6 +461,15 @@ mod imp {
             info.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
             let focus = if GetGUIThreadInfo(thread, &mut info) != 0 { info.hwndFocus } else { std::ptr::null_mut() };
             let k = &*(lparam as *const KBDLLHOOKSTRUCT);
+            if debug_keys() && matches!(k.vkCode as u16, VK_LWIN | VK_RWIN | VK_TAB | 0x52) {
+                eprintln!(
+                    "keys: vk {:X} msg {wparam:X} flags {:X} focus {focus:?} ({}) in control {}",
+                    k.vkCode,
+                    k.flags,
+                    class_name(focus),
+                    !focus.is_null() && IsChild(control, focus) != 0
+                );
+            }
             if !focus.is_null() && IsChild(control, focus) != 0 {
                 let up = wparam == WM_KEYUP as usize || wparam == WM_SYSKEYUP as usize;
                 let vk = k.vkCode as u16;
@@ -770,6 +792,9 @@ mod imp {
             let control = win.map(hwnd).filter(|w| class_name(*w).starts_with("AtlAxWin"));
             KEY_MAIN.store(self.main as isize, Ordering::Relaxed);
             KEY_TARGET.store(control.map_or(0, |w| w as isize), Ordering::Relaxed);
+            if debug_keys() {
+                eprintln!("keys: forward to {win:?} ({:?}) -> control {control:?}", win.map(|w| class_name(hwnd(w))));
+            }
             if control.is_some() {
                 static HOOK: std::sync::Once = std::sync::Once::new();
                 // A thread of its own with a message loop, so the hook never waits for a frame.
@@ -786,6 +811,9 @@ mod imp {
                                     UnhookWindowsHookEx(hook);
                                 }
                                 hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0);
+                                if hook.is_null() && debug_keys() {
+                                    eprintln!("keys: SetWindowsHookExW failed: {}", std::io::Error::last_os_error());
+                                }
                             }
                             DispatchMessageW(&msg);
                         }
