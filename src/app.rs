@@ -1985,6 +1985,10 @@ impl App {
             emb.forward_keys(keys_to);
             self.keys_to = keys_to;
         }
+        // A click into the shown session of the Windows RDP control brings RC Manager to the front.
+        if let Some(t) = self.active_tab.filter(|s| self.ax_sessions.contains_key(s)).and_then(|s| self.tabs.iter().find(|t| t.session == s && t.ended.is_none())) {
+            emb.activate_on_click(emb.client_of(t.host));
+        }
         // Unlock: show the tab, give the session the keyboard, then type the password into it.
         let mut unlock_done = false;
         if let Some(u) = &mut self.unlock {

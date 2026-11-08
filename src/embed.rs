@@ -187,6 +187,7 @@ mod imp {
         /// The host's size has settled (X11 clients follow their window size by themselves).
         pub fn resized(&self, _host: WinId) {}
         pub fn forward_keys(&self, _win: Option<WinId>) {}
+        pub fn activate_on_click(&self, _win: Option<WinId>) {}
 
         /// Whether RC Manager's window is the active one and an embedded client has the focus;
         /// on X11 the window manager restores the focus of embedded clients by itself.
@@ -351,6 +352,7 @@ mod imp {
         pub fn focus(&self, _win: Option<WinId>) {}
         pub fn resized(&self, _host: WinId) {}
         pub fn forward_keys(&self, _win: Option<WinId>) {}
+        pub fn activate_on_click(&self, _win: Option<WinId>) {}
         pub fn active(&self) -> bool {
             false
         }
@@ -461,38 +463,32 @@ mod imp {
         )
     }
 
-    /// A click into the control while another program is active.
-    static CLICKED: AtomicBool = AtomicBool::new(false);
+    /// Original window procedures of the control's windows (see `Embedder::activate_on_click`).
+    static ORIGINAL_PROCS: std::sync::Mutex<Vec<(isize, isize)>> = std::sync::Mutex::new(Vec::new());
 
-    /// Brings RC Manager to the foreground after a click into the control: the Remote Desktop
-    /// control does not activate the window itself, so key combinations would still go to the
-    /// program that was active before.
-    unsafe extern "system" fn mouse_hook(code: i32, wparam: usize, lparam: isize) -> isize {
-        let control = KEY_TARGET.load(Ordering::Relaxed) as HWND;
-        let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
-        if code == HC_ACTION as i32 && !control.is_null() {
-            match wparam as u32 {
-                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
-                    let m = &*(lparam as *const MSLLHOOKSTRUCT);
-                    let w = WindowFromPoint(m.pt);
-                    let hit = !w.is_null() && (w == control || IsChild(control, w) != 0);
-                    if debug_keys() {
-                        eprintln!("keys: button down on {}, in control {hit}, foreground {}", describe(w), describe(GetForegroundWindow()));
-                    }
-                    CLICKED.store(hit && GetForegroundWindow() != main, Ordering::Relaxed);
+    /// Window procedure put in front of the Remote Desktop control's windows: a click while
+    /// another program is active brings RC Manager to the foreground, which the control does
+    /// not do itself (its input window does not activate the window).
+    unsafe extern "system" fn activating_proc(w: HWND, msg: u32, wparam: usize, lparam: isize) -> isize {
+        let original = ORIGINAL_PROCS.lock().map(|p| p.iter().find(|(h, _)| *h == w as isize).map(|(_, o)| *o)).ok().flatten();
+        if msg == WM_MOUSEACTIVATE {
+            let root = GetAncestor(w, GA_ROOT);
+            if GetForegroundWindow() != root {
+                let ok = SetForegroundWindow(root) != 0;
+                if debug_keys() {
+                    eprintln!("keys: click into the session ({}), SetForegroundWindow {ok}", class_name(w));
                 }
-                // After the button is released the click has reached RC Manager, which may
-                // then take the foreground.
-                WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP if CLICKED.swap(false, Ordering::Relaxed) => {
-                    let ok = SetForegroundWindow(main) != 0;
-                    if debug_keys() {
-                        eprintln!("keys: click into the session, SetForegroundWindow {ok}, foreground now {:?}", GetForegroundWindow());
-                    }
-                }
-                _ => {}
             }
         }
-        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+        if msg == WM_NCDESTROY {
+            if let Ok(mut p) = ORIGINAL_PROCS.lock() {
+                p.retain(|(h, _)| *h != w as isize);
+            }
+        }
+        match original {
+            Some(o) => CallWindowProcW(std::mem::transmute::<isize, WNDPROC>(o), w, msg, wparam, lparam),
+            None => DefWindowProcW(w, msg, wparam, lparam),
+        }
     }
 
     unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
@@ -857,20 +853,17 @@ mod imp {
                 // A thread of its own with a message loop, so the hook never waits for a frame.
                 HOOK.call_once(|| {
                     std::thread::spawn(|| unsafe {
-                        let (mut hook, mut mouse): (HHOOK, HHOOK) = (std::ptr::null_mut(), std::ptr::null_mut());
+                        let mut hook: HHOOK = std::ptr::null_mut();
                         SetTimer(std::ptr::null_mut(), 0, 500, None);
                         let mut msg: MSG = std::mem::zeroed();
                         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                             // Low-level hooks run newest first, and the control installs one of
                             // its own that keeps the keys local here: renew ours to stay ahead.
                             if msg.message == WM_TIMER && (hook.is_null() || KEY_TARGET.load(Ordering::Relaxed) != 0) {
-                                for h in [hook, mouse] {
-                                    if !h.is_null() {
-                                        UnhookWindowsHookEx(h);
-                                    }
+                                if !hook.is_null() {
+                                    UnhookWindowsHookEx(hook);
                                 }
                                 hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0);
-                                mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), GetModuleHandleW(std::ptr::null()), 0);
                                 if hook.is_null() && debug_keys() {
                                     eprintln!("keys: SetWindowsHookExW failed: {}", std::io::Error::last_os_error());
                                 }
@@ -879,6 +872,34 @@ mod imp {
                         }
                     });
                 });
+            }
+        }
+
+        /// Makes a click into the Remote Desktop control in `win` bring RC Manager to the
+        /// foreground (see `activating_proc`). The control creates its windows when it connects
+        /// and may replace them, so this is repeated while its session is shown.
+        pub fn activate_on_click(&self, win: Option<WinId>) {
+            let Some(control) = win.map(hwnd).filter(|w| class_name(*w).starts_with("AtlAxWin")) else { return };
+            let mut all = Vec::new();
+            let mut todo = children(control);
+            while let Some(c) = todo.pop() {
+                todo.extend(children(c));
+                all.push(c);
+            }
+            let ours = activating_proc as *const () as isize;
+            for c in all {
+                unsafe {
+                    if GetWindowLongPtrW(c, GWLP_WNDPROC) == ours {
+                        continue;
+                    }
+                    let original = SetWindowLongPtrW(c, GWLP_WNDPROC, ours);
+                    if original != 0 {
+                        if let Ok(mut p) = ORIGINAL_PROCS.lock() {
+                            p.retain(|(h, _)| *h != c as isize);
+                            p.push((c as isize, original));
+                        }
+                    }
+                }
             }
         }
 
