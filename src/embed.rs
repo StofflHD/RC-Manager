@@ -845,6 +845,13 @@ mod imp {
         /// the window on a click, so key combinations would go to that other program.
         pub fn activate_on_click(&self, host: WinId) -> bool {
             unsafe {
+                if debug_keys() && GetForegroundWindow() != self.main {
+                    static LAST: AtomicIsize = AtomicIsize::new(0);
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as isize);
+                    if LAST.swap(now, Ordering::Relaxed) != now {
+                        eprintln!("keys: polling while inactive, button {}", GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000 != 0);
+                    }
+                }
                 if GetForegroundWindow() == self.main || (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) == 0 {
                     return false;
                 }
@@ -852,10 +859,18 @@ mod imp {
                 GetCursorPos(&mut p);
                 // Only a click that really hits the session, not a window of another program above it.
                 let (w, host) = (WindowFromPoint(p), hwnd(host));
-                if w.is_null() || (w != host && IsChild(host, w) == 0) {
+                let hit = !w.is_null() && (w == host || IsChild(host, w) != 0);
+                if debug_keys() {
+                    eprintln!("keys: click at {},{} on {w:?} ({}), in session {hit}", p.x, p.y, class_name(w));
+                }
+                if !hit {
                     return false;
                 }
-                SetForegroundWindow(self.main) != 0
+                let ok = SetForegroundWindow(self.main) != 0;
+                if debug_keys() {
+                    eprintln!("keys: SetForegroundWindow {ok}, foreground now {:?}", GetForegroundWindow());
+                }
+                ok
             }
         }
 
