@@ -187,9 +187,6 @@ mod imp {
         /// The host's size has settled (X11 clients follow their window size by themselves).
         pub fn resized(&self, _host: WinId) {}
         pub fn forward_keys(&self, _win: Option<WinId>) {}
-        pub fn activate_on_click(&self, _host: WinId) -> bool {
-            false
-        }
 
         /// Whether RC Manager's window is the active one and an embedded client has the focus;
         /// on X11 the window manager restores the focus of embedded clients by itself.
@@ -354,9 +351,6 @@ mod imp {
         pub fn focus(&self, _win: Option<WinId>) {}
         pub fn resized(&self, _host: WinId) {}
         pub fn forward_keys(&self, _win: Option<WinId>) {}
-        pub fn activate_on_click(&self, _host: WinId) -> bool {
-            false
-        }
         pub fn active(&self) -> bool {
             false
         }
@@ -449,6 +443,37 @@ mod imp {
     fn debug_keys() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ON.get_or_init(|| std::env::var_os("RC_MANAGER_DEBUG_KEYS").is_some())
+    }
+
+    /// A click into the control while another program is active.
+    static CLICKED: AtomicBool = AtomicBool::new(false);
+
+    /// Brings RC Manager to the foreground after a click into the control: the Remote Desktop
+    /// control does not activate the window itself, so key combinations would still go to the
+    /// program that was active before.
+    unsafe extern "system" fn mouse_hook(code: i32, wparam: usize, lparam: isize) -> isize {
+        let control = KEY_TARGET.load(Ordering::Relaxed) as HWND;
+        let main = KEY_MAIN.load(Ordering::Relaxed) as HWND;
+        if code == HC_ACTION as i32 && !control.is_null() {
+            match wparam as u32 {
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+                    let m = &*(lparam as *const MSLLHOOKSTRUCT);
+                    let w = WindowFromPoint(m.pt);
+                    let hit = !w.is_null() && (w == control || IsChild(control, w) != 0);
+                    CLICKED.store(hit && GetForegroundWindow() != main, Ordering::Relaxed);
+                }
+                // After the button is released the click has reached RC Manager, which may
+                // then take the foreground.
+                WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP if CLICKED.swap(false, Ordering::Relaxed) => {
+                    let ok = SetForegroundWindow(main) != 0;
+                    if debug_keys() {
+                        eprintln!("keys: click into the session, SetForegroundWindow {ok}, foreground now {:?}", GetForegroundWindow());
+                    }
+                }
+                _ => {}
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
     }
 
     unsafe extern "system" fn key_hook(code: i32, wparam: usize, lparam: isize) -> isize {
@@ -818,17 +843,20 @@ mod imp {
                 // A thread of its own with a message loop, so the hook never waits for a frame.
                 HOOK.call_once(|| {
                     std::thread::spawn(|| unsafe {
-                        let mut hook: HHOOK = std::ptr::null_mut();
+                        let (mut hook, mut mouse): (HHOOK, HHOOK) = (std::ptr::null_mut(), std::ptr::null_mut());
                         SetTimer(std::ptr::null_mut(), 0, 500, None);
                         let mut msg: MSG = std::mem::zeroed();
                         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                             // Low-level hooks run newest first, and the control installs one of
                             // its own that keeps the keys local here: renew ours to stay ahead.
                             if msg.message == WM_TIMER && (hook.is_null() || KEY_TARGET.load(Ordering::Relaxed) != 0) {
-                                if !hook.is_null() {
-                                    UnhookWindowsHookEx(hook);
+                                for h in [hook, mouse] {
+                                    if !h.is_null() {
+                                        UnhookWindowsHookEx(h);
+                                    }
                                 }
                                 hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), GetModuleHandleW(std::ptr::null()), 0);
+                                mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), GetModuleHandleW(std::ptr::null()), 0);
                                 if hook.is_null() && debug_keys() {
                                     eprintln!("keys: SetWindowsHookExW failed: {}", std::io::Error::last_os_error());
                                 }
@@ -837,40 +865,6 @@ mod imp {
                         }
                     });
                 });
-            }
-        }
-
-        /// Brings RC Manager to the foreground when the left button is pressed on the session in
-        /// `host` while another program is active. The Remote Desktop control does not activate
-        /// the window on a click, so key combinations would go to that other program.
-        pub fn activate_on_click(&self, host: WinId) -> bool {
-            unsafe {
-                if debug_keys() && GetForegroundWindow() != self.main {
-                    static LAST: AtomicIsize = AtomicIsize::new(0);
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as isize);
-                    if LAST.swap(now, Ordering::Relaxed) != now {
-                        eprintln!("keys: polling while inactive, button {}", GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000 != 0);
-                    }
-                }
-                if GetForegroundWindow() == self.main || (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) == 0 {
-                    return false;
-                }
-                let mut p = POINT { x: 0, y: 0 };
-                GetCursorPos(&mut p);
-                // Only a click that really hits the session, not a window of another program above it.
-                let (w, host) = (WindowFromPoint(p), hwnd(host));
-                let hit = !w.is_null() && (w == host || IsChild(host, w) != 0);
-                if debug_keys() {
-                    eprintln!("keys: click at {},{} on {w:?} ({}), in session {hit}", p.x, p.y, class_name(w));
-                }
-                if !hit {
-                    return false;
-                }
-                let ok = SetForegroundWindow(self.main) != 0;
-                if debug_keys() {
-                    eprintln!("keys: SetForegroundWindow {ok}, foreground now {:?}", GetForegroundWindow());
-                }
-                ok
             }
         }
 
