@@ -1931,6 +1931,11 @@ impl App {
                 tab.resized = None;
                 tab.size_told = Instant::now();
             }
+            // A click into the session while another program is active brings RC Manager to the
+            // front (the Windows RDP control does not do that itself).
+            if visible && emb.activate_on_click(tab.host) {
+                focus_change = Some(Some((tab.session, tab.host)));
+            }
             // Keyboard: a click into the session gives it the focus.
             if visible && self.session_focus != Some(tab.session) {
                 if let Some(p) = emb.pointer() {

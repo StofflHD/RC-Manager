@@ -187,6 +187,9 @@ mod imp {
         /// The host's size has settled (X11 clients follow their window size by themselves).
         pub fn resized(&self, _host: WinId) {}
         pub fn forward_keys(&self, _win: Option<WinId>) {}
+        pub fn activate_on_click(&self, _host: WinId) -> bool {
+            false
+        }
 
         /// Whether RC Manager's window is the active one and an embedded client has the focus;
         /// on X11 the window manager restores the focus of embedded clients by itself.
@@ -351,6 +354,9 @@ mod imp {
         pub fn focus(&self, _win: Option<WinId>) {}
         pub fn resized(&self, _host: WinId) {}
         pub fn forward_keys(&self, _win: Option<WinId>) {}
+        pub fn activate_on_click(&self, _host: WinId) -> bool {
+            false
+        }
         pub fn active(&self) -> bool {
             false
         }
@@ -831,6 +837,25 @@ mod imp {
                         }
                     });
                 });
+            }
+        }
+
+        /// Brings RC Manager to the foreground when the left button is pressed on the session in
+        /// `host` while another program is active. The Remote Desktop control does not activate
+        /// the window on a click, so key combinations would go to that other program.
+        pub fn activate_on_click(&self, host: WinId) -> bool {
+            unsafe {
+                if GetForegroundWindow() == self.main || (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) == 0 {
+                    return false;
+                }
+                let mut p = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut p);
+                // Only a click that really hits the session, not a window of another program above it.
+                let (w, host) = (WindowFromPoint(p), hwnd(host));
+                if w.is_null() || (w != host && IsChild(host, w) == 0) {
+                    return false;
+                }
+                SetForegroundWindow(self.main) != 0
             }
         }
 
