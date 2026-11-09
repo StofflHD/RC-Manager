@@ -42,7 +42,7 @@ mod imp {
     use std::time::{Duration, Instant};
     use windows::core::{Interface, IUnknown, BSTR, GUID, HSTRING, PCWSTR, VARIANT};
     use windows::Win32::System::Com::{CLSIDFromProgID, StringFromGUID2, IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS};
-    use windows::Win32::System::Ole::{OleInitialize, DISPID_PROPERTYPUT};
+    use windows::Win32::System::Ole::{IOleObject, OleInitialize, DISPID_PROPERTYPUT, OLEIVERB_UIACTIVATE};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetClientRect, WS_CHILD, WS_CLIPCHILDREN, WS_VISIBLE};
@@ -380,6 +380,23 @@ mod imp {
             self.note.take()
         }
 
+        /// Activates the control the way WinForms does when it gets the focus (OLE UI
+        /// activation); its keyboard hook only sends key combinations to an active control.
+        pub fn activate(&self) {
+            unsafe {
+                let Ok(ole) = self.client.0.cast::<IOleObject>() else { return };
+                let Ok(site) = ole.GetClientSite() else { return };
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetClientRect(self.window, &mut r);
+                let rect = windows::Win32::Foundation::RECT { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+                let parent = windows::Win32::Foundation::HWND(self.window);
+                let result = ole.DoVerb(OLEIVERB_UIACTIVATE.0, std::ptr::null(), &site, 0, parent, &rect);
+                if std::env::var_os("RC_MANAGER_DEBUG_KEYS").is_some() {
+                    eprintln!("keys: UI activation of the control: {result:?}");
+                }
+            }
+        }
+
         /// Ends the session (RC Manager closes the tab or exits).
         pub fn disconnect(&self) {
             if self.state.get() != 0 {
@@ -419,6 +436,7 @@ impl RdpAx {
     pub fn note(&self) -> Option<String> {
         None
     }
+    pub fn activate(&self) {}
     pub fn disconnect(&self) {}
 }
 

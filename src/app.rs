@@ -474,6 +474,8 @@ pub struct App {
     session_focus: Option<u64>,
     /// The Windows RDP control that gets key combinations (see `Embedder::forward_keys`).
     keys_to: Option<crate::embed::WinId>,
+    /// RC Manager's window was the active one in the last frame.
+    was_active: bool,
     /// Last time the focus was handed back to a session (see `has_focus`).
     focus_checked: Instant,
     unlock: Option<Unlock>,
@@ -680,6 +682,7 @@ impl App {
             session_rect: None,
             session_focus: None,
             keys_to: None,
+            was_active: false,
             focus_checked: Instant::now(),
             unlock: None,
             typing: None,
@@ -1955,6 +1958,14 @@ impl App {
         // session that should have the focus gets it back (wfreerdp ignores mouse and keyboard
         // without it); retried at most every 300 ms.
         let active = emb.active();
+        // Just activated (e.g. a click into the session): the session gets the focus again, so
+        // the Windows RDP control is activated as well.
+        if active && !self.was_active && focus_change.is_none() {
+            if let Some(tab) = self.tabs.iter().find(|t| Some(t.session) == self.session_focus && t.ended.is_none()) {
+                focus_change = Some(Some((tab.session, tab.host)));
+            }
+        }
+        self.was_active = active;
         if active && focus_change.is_none() && self.focus_checked.elapsed() > Duration::from_millis(300) {
             if let Some(tab) = self.tabs.iter().find(|t| Some(t.session) == self.session_focus && t.ended.is_none()) {
                 if !emb.has_focus(emb.client_of(tab.host)) {
@@ -1965,6 +1976,9 @@ impl App {
         }
         match focus_change {
             Some(Some((session, host))) => {
+                if let Some(ax) = self.ax_sessions.get(&session) {
+                    ax.activate();
+                }
                 emb.focus(emb.client_of(host));
                 self.session_focus = Some(session);
             }
