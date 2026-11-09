@@ -261,6 +261,16 @@ pub enum RdpShortcuts {
 }
 
 impl RdpShortcuts {
+    /// The value of the control's `KeyboardHookMode`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn hook_mode(self) -> i32 {
+        match self {
+            RdpShortcuts::Local => 0,
+            RdpShortcuts::Remote => 1,
+            RdpShortcuts::FullScreen => 2,
+        }
+    }
+
     pub const ALL: [RdpShortcuts; 3] = [RdpShortcuts::Local, RdpShortcuts::Remote, RdpShortcuts::FullScreen];
 
     pub fn label(self) -> &'static str {

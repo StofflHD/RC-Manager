@@ -275,7 +275,9 @@ mod imp {
                 s.put("AudioRedirectionMode", if o.sound { 0 } else if o.sound_remote { 1 } else { 2 }).ok();
                 // RC Manager sends key combinations to the session itself (`Embedder::forward_keys`);
                 // the control's own keyboard hook would only get in the way.
-                s.put("KeyboardHookMode", 0).ok();
+                // Test: RC_MANAGER_KEYS_NATIVE=1 leaves key combinations to the control's own hook.
+                let native = std::env::var_os("RC_MANAGER_KEYS_NATIVE").is_some();
+                s.put("KeyboardHookMode", if native { o.shortcuts.hook_mode() } else { 0 }).ok();
                 if o.remote_app.trim().is_empty() && !o.start_program.trim().is_empty() {
                     s.put("StartProgram", BSTR::from(o.start_program.trim())).ok();
                     s.put("WorkDir", BSTR::from(o.start_dir.trim())).ok();

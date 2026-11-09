@@ -844,6 +844,8 @@ mod imp {
         pub fn forward_keys(&self, win: Option<WinId>) {
             let control = win.map(hwnd).filter(|w| class_name(*w).starts_with("AtlAxWin"));
             KEY_MAIN.store(self.main as isize, Ordering::Relaxed);
+            // Test: RC_MANAGER_KEYS_NATIVE=1 leaves key combinations to the control's own hook.
+            let control = control.filter(|_| std::env::var_os("RC_MANAGER_KEYS_NATIVE").is_none());
             KEY_TARGET.store(control.map_or(0, |w| w as isize), Ordering::Relaxed);
             if debug_keys() {
                 eprintln!("keys: forward to {win:?} ({:?}) -> control {control:?}", win.map(|w| class_name(hwnd(w))));
@@ -854,7 +856,7 @@ mod imp {
                 HOOK.call_once(|| {
                     std::thread::spawn(|| unsafe {
                         let mut hook: HHOOK = std::ptr::null_mut();
-                        SetTimer(std::ptr::null_mut(), 0, 500, None);
+                        SetTimer(std::ptr::null_mut(), 0, 100, None);
                         let mut msg: MSG = std::mem::zeroed();
                         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                             // Low-level hooks run newest first, and the control installs one of
