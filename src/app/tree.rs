@@ -124,7 +124,7 @@ impl App {
                         actions.push(Action::QuickConnect);
                     }
                     egui::ComboBox::from_id_salt("quick_proto").selected_text(self.s.quick_protocol.label()).show_ui(ui, |ui| {
-                        for p in [Protocol::Rdp, Protocol::Ssh, Protocol::Vnc, Protocol::Web] {
+                        for p in QUICK_PROTOCOLS {
                             ui.selectable_value(&mut self.s.quick_protocol, p, p.label());
                         }
                     });
