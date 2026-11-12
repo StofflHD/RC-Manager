@@ -159,7 +159,16 @@ mod imp {
                 let (w, h) = (r.right.max(width as i32), r.bottom.max(height as i32));
                 let size = super::desktop_size(w as u32, h as u32);
                 let mut last = anyhow!("the Remote Desktop ActiveX control is not installed");
-                for progid in PROGIDS {
+                // Test: RC_MANAGER_AX_PROGID picks the control version (the original uses .10).
+                let forced = std::env::var("RC_MANAGER_AX_PROGID").ok();
+                let progids: Vec<&str> = match forced.as_deref() {
+                    Some(p) => vec![p],
+                    None => PROGIDS.to_vec(),
+                };
+                if std::env::var_os("RC_MANAGER_DEBUG_KEYS").is_some() {
+                    eprintln!("keys: control versions tried: {progids:?}");
+                }
+                for progid in progids {
                     // ATL takes text that is no registered class for a web address and would
                     // quietly create a browser: only create classes that exist, by CLSID.
                     let Ok(clsid) = CLSIDFromProgID(&HSTRING::from(progid)) else { continue };
