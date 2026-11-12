@@ -381,10 +381,8 @@ mod imp {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         GetAsyncKeyState, GetKeyboardLayout, MapVirtualKeyExW, SendInput, SetFocus, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, VK_CONTROL, VK_ESCAPE, VK_LBUTTON, VK_LWIN, VK_RWIN, VK_SPACE,
-        VK_TAB,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC, VK_LBUTTON,
     };
-    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     pub struct Embedder {
