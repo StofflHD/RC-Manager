@@ -24,6 +24,9 @@ mod tree;
 /// checkouts may have CRLF line endings).
 const LICENSE: &str = include_str!("../LICENSE");
 
+/// Protocols of the quick connect bar.
+const QUICK_PROTOCOLS: [Protocol; 3] = [Protocol::Rdp, Protocol::Ssh, Protocol::Vnc];
+
 /// Everything about the window that survives a restart (eframe storage).
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -634,7 +637,11 @@ fn now_string() -> String {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Store, tools: Tools, connect: Vec<String>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
-        let s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
+        let mut s: Settings = cc.storage.and_then(|st| eframe::get_value(st, eframe::APP_KEY)).unwrap_or_default();
+        // Earlier versions offered Web in the quick connect bar.
+        if !QUICK_PROTOCOLS.contains(&s.quick_protocol) {
+            s.quick_protocol = Protocol::Rdp;
+        }
         // Captured before `s` moves into the app; the sessions open at the last exit.
         let reopen_offer = s.reopen.clone();
         let (events_tx, events_rx) = channel();
