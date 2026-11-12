@@ -1965,6 +1965,12 @@ impl App {
                 focus_change = Some(Some((tab.session, tab.host)));
             }
         }
+        if active != self.was_active {
+            // The Windows RDP control learns that its frame window was (de)activated.
+            for ax in self.ax_sessions.values() {
+                ax.frame_activated(active);
+            }
+        }
         self.was_active = active;
         if active && focus_change.is_none() && self.focus_checked.elapsed() > Duration::from_millis(300) {
             if let Some(tab) = self.tabs.iter().find(|t| Some(t.session) == self.session_focus && t.ended.is_none()) {
@@ -1978,6 +1984,7 @@ impl App {
             Some(Some((session, host))) => {
                 if let Some(ax) = self.ax_sessions.get(&session) {
                     ax.activate();
+                    ax.frame_activated(emb.active());
                 }
                 emb.focus(emb.client_of(host));
                 self.session_focus = Some(session);

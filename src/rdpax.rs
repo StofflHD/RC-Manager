@@ -42,7 +42,7 @@ mod imp {
     use std::time::{Duration, Instant};
     use windows::core::{Interface, IUnknown, BSTR, GUID, HSTRING, PCWSTR, VARIANT};
     use windows::Win32::System::Com::{CLSIDFromProgID, StringFromGUID2, IDispatch, DISPATCH_FLAGS, DISPATCH_METHOD, DISPATCH_PROPERTYGET, DISPATCH_PROPERTYPUT, DISPPARAMS};
-    use windows::Win32::System::Ole::{IOleObject, OleInitialize, DISPID_PROPERTYPUT, OLEIVERB_UIACTIVATE};
+    use windows::Win32::System::Ole::{IOleInPlaceActiveObject, IOleObject, OleInitialize, DISPID_PROPERTYPUT, OLEIVERB_UIACTIVATE};
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetClientRect, WS_CHILD, WS_CLIPCHILDREN, WS_VISIBLE};
@@ -275,9 +275,9 @@ mod imp {
                 s.put("AudioRedirectionMode", if o.sound { 0 } else if o.sound_remote { 1 } else { 2 }).ok();
                 // RC Manager sends key combinations to the session itself (`Embedder::forward_keys`);
                 // the control's own keyboard hook would only get in the way.
-                // Test: RC_MANAGER_KEYS_NATIVE=1 leaves key combinations to the control's own hook.
-                let native = std::env::var_os("RC_MANAGER_KEYS_NATIVE").is_some();
-                s.put("KeyboardHookMode", if native { o.shortcuts.hook_mode() } else { 0 }).ok();
+                // Test: RC_MANAGER_KEYS_OWN=1 uses RC Manager's own hook instead of the control's.
+                let own = std::env::var_os("RC_MANAGER_KEYS_OWN").is_some();
+                s.put("KeyboardHookMode", if own { 0 } else { o.shortcuts.hook_mode() }).ok();
                 if o.remote_app.trim().is_empty() && !o.start_program.trim().is_empty() {
                     s.put("StartProgram", BSTR::from(o.start_program.trim())).ok();
                     s.put("WorkDir", BSTR::from(o.start_dir.trim())).ok();
@@ -397,6 +397,20 @@ mod imp {
             }
         }
 
+        /// Tells the control whether RC Manager's window is active, as a container does
+        /// (WinForms calls this when its form is activated): the control's keyboard hook sends
+        /// key combinations to the session only while the frame window counts as active.
+        pub fn frame_activated(&self, active: bool) {
+            unsafe {
+                let Ok(o) = self.client.0.cast::<IOleInPlaceActiveObject>() else { return };
+                let a = o.OnFrameWindowActivate(active);
+                let b = o.OnDocWindowActivate(active);
+                if std::env::var_os("RC_MANAGER_DEBUG_KEYS").is_some() {
+                    eprintln!("keys: OnFrameWindowActivate({active}): {a:?}, OnDocWindowActivate: {b:?}");
+                }
+            }
+        }
+
         /// Ends the session (RC Manager closes the tab or exits).
         pub fn disconnect(&self) {
             if self.state.get() != 0 {
@@ -437,6 +451,7 @@ impl RdpAx {
         None
     }
     pub fn activate(&self) {}
+    pub fn frame_activated(&self, _active: bool) {}
     pub fn disconnect(&self) {}
 }
 
