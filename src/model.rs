@@ -225,30 +225,6 @@ pub struct RdpOptions {
     pub start_program: String,
     pub start_dir: String,
     pub extra_args: String,
-    /// Windows: the RDP client for sessions in tabs.
-    pub client: RdpClient,
-}
-
-/// The RDP client on Windows: the Remote Desktop ActiveX control of mstsc.exe, or FreeRDP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum RdpClient {
-    /// As set in *Options → Windows RDP Client in Tabs*.
-    #[default]
-    Default,
-    Windows,
-    FreeRdp,
-}
-
-impl RdpClient {
-    pub const ALL: [RdpClient; 3] = [RdpClient::Default, RdpClient::Windows, RdpClient::FreeRdp];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            RdpClient::Default => "Default (Options)",
-            RdpClient::Windows => "Windows RDP client (mstsc)",
-            RdpClient::FreeRdp => "FreeRDP",
-        }
-    }
 }
 
 /// Where Windows key combinations apply (`KeyboardHookMode`).
@@ -334,7 +310,6 @@ impl Default for RdpOptions {
             start_program: String::new(),
             start_dir: String::new(),
             extra_args: String::new(),
-            client: RdpClient::Default,
         }
     }
 }

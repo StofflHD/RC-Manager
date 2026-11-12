@@ -20,8 +20,8 @@ then keeps the active sessions and a counter of new warnings visible.
 |---|---|---|
 | Folder tree, search, sort order | ✔ | ✔ |
 | Sessions as tabs, scaled with the window | ✔ | ✔ (Linux: X11/XWayland) |
-| RDP | embedded MSTSC ActiveX | Linux: FreeRDP 3 drawn into the tab; Windows: the MSTSC ActiveX control (FreeRDP optional); remote resolution follows the tab or the desktop is scaled |
-| RDP options | display, experience, sound, key combinations, redirections, NLA, server authentication, TS gateway, start program, keyboard layout | the same (ports and Plug and Play devices only with the Windows RDP client); RemoteApp in addition |
+| RDP | embedded MSTSC ActiveX | FreeRDP 3 in the tab (Linux: drawn into the tab; Windows: `wfreerdp` moved into the tab); remote resolution follows the tab or the desktop is scaled |
+| RDP options | display, experience, sound, key combinations, redirections, NLA, server authentication, TS gateway, start program, keyboard layout | the same except ports and Plug and Play devices; RemoteApp in addition |
 | Group settings (shared settings for many connections) | ✔ | ✔ settings profiles for RDP, SSH and VNC (*Edit → Settings Profiles …*): a connection uses its own settings, a profile, or the profile of its folder (inherited by sub-folders) |
 | Unlock a locked RDP session | ✔ (send password) | ✔ (*Unlock* types the stored password, no reconnect) |
 | SSH | embedded PuTTY | Linux: `ssh` in an xterm inside the tab, password via `sshpass`; Windows: PuTTY inside the tab |
@@ -45,8 +45,8 @@ then keeps the active sessions and a counter of new warnings visible.
 RDP, SSH and VNC sessions open as tabs next to the connection properties and follow
 the window size, like in the original:
 
-* **RDP** – Linux: FreeRDP draws into the tab (`/parent-window`). Windows: the Remote Desktop
-  ActiveX control of mstsc.exe runs inside RC Manager's window (FreeRDP as fallback). With
+* **RDP** – FreeRDP 3. Linux: it draws into the tab (`/parent-window`). Windows: the window of
+  `wfreerdp` is moved into the tab. With
   *Display → Adapt the remote resolution to the window size* (default) the remote desktop gets
   the size of the tab and follows every resize (needs Windows 8.1 / Server 2012 R2 or newer);
   without it, the desktop (fixed resolution or the tab size) is scaled into the tab.
@@ -84,9 +84,7 @@ Manager's database; later connections accept exactly this certificate without as
 server presents a different certificate later, the dialog appears again with a prominent
 warning. On Linux FreeRDP runs with its own configuration directory below RC Manager's data, so
 its certificate store is not used; on Windows the patched `wfreerdp` asks RC Manager instead of
-showing its own dialog (see *Installation (Windows)*). The Windows RDP control instead uses
-Windows' own certificate dialog and trust store, like mstsc; *Do not verify certificate* switches its
-server authentication off.
+showing its own dialog (see *Installation (Windows)*).
 
 ## Installation (AppImage)
 
@@ -136,15 +134,11 @@ next to `rc-manager.exe`:
   `rc-manager.exe`. The file `rc-manager.portable` keeps all data and settings in the folder
   `data` next to it.
 
-Sessions open as tabs like on Linux. RDP tabs use the Remote Desktop client built into Windows –
-the ActiveX control of mstsc.exe, as in the original – hosted in RC Manager's window: it draws
-with the GPU and shows its own certificate and logon dialogs. With *Key combinations: On the
-remote computer* (default) the Windows key, Alt+Tab, Alt+Esc, Ctrl+Esc and Alt+Space go to the
-session while it has the keyboard; RC Manager forwards them itself, since the control's own
-keyboard hook does not work when it is embedded. *Options → Windows RDP Client in
-Tabs* switches to FreeRDP (`wfreerdp`) instead (per connection or settings profile: *Advanced →
-RDP client*), which is also used for RemoteApp and when the
-control is not available. PuTTY's and TigerVNC's windows are moved into the tab (their title bar
+Sessions open as tabs like on Linux. RDP uses FreeRDP (`wfreerdp`, included in the packages)
+on Windows too: with *Key combinations: On the remote computer* (default) the Windows key,
+Alt+Tab and similar go to the session while it has the keyboard. (The Remote Desktop ActiveX
+control of mstsc.exe, which the original uses, was tried in 0.9.7–0.9.15 and removed: hosted in
+RC Manager's window it kept key combinations such as Win+R on the local computer.) PuTTY's and TigerVNC's windows are moved into the tab (their title bar
 and frame lie outside the tab, as in the original). The installed version stores its data in
 `%APPDATA%\rc-manager`. FreeRDP's Windows client is built from source with a small patch
 (`packaging/windows/patch-freerdp.py`): when RC Manager starts it, it asks certificate and logon
@@ -252,8 +246,7 @@ the original to AES before exporting.
   `vault.key` (mode 0600); with a master password it is derived with Argon2id and never stored.
 * FreeRDP 3 gets passwords via an environment variable (`/args-from:env:`), `sshpass`,
   `vncviewer` and PuTTY (`-pwfile`) via short-lived files with mode 0600 in `$XDG_RUNTIME_DIR`
-  (Windows: the user's temp folder). The Windows RDP control gets the password inside RC
-  Manager's process, without files or command lines. Only FreeRDP 2 and `{P}` in external commands put the
+  (Windows: the user's temp folder). Only FreeRDP 2 and `{P}` in external commands put the
   password into the process list; the application warns about that.
 
 ## Security notes and differences to the original
@@ -276,7 +269,7 @@ Hardening in this version:
 * FreeRDP 3 gets its arguments via an environment variable (readable only by the user), so
   stdin stays free for certificate questions; with sshpass, ssh accepts new host keys on first
   use (`StrictHostKeyChecking=accept-new`) but still refuses changed ones.
-* Passwords never appear on the command line with the Windows RDP control, FreeRDP 3, sshpass,
+* Passwords never appear on the command line with FreeRDP 3, sshpass,
   vncviewer and PuTTY; temporary
   password files are created exclusively (`O_EXCL`, mode 0600) and removed after 20 s or on exit.
 * The data directory is mode 0700, the database 0600 (host and user names are stored in plain text).
@@ -301,7 +294,6 @@ src/store.rs           SQLite storage
 src/vault.rs           password encryption
 src/launch.rs          starting FreeRDP, ssh/PuTTY, vncviewer, the browser
 src/embed.rs           embedding of sessions into tabs (X11 and Win32), typing for Unlock
-src/rdpax.rs           Windows: RDP with the Remote Desktop ActiveX control (mstsc)
 src/net.rs             Wake-on-LAN, port check
 src/update.rs          updater (GitHub releases, SHA-256 check, replaces the AppImage or the
                        Windows installation)

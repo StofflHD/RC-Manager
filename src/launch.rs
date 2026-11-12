@@ -236,8 +236,7 @@ impl Tools {
         let label = |p: &str| if is_bundled(p) { format!("bundled ({p})") } else { p.to_string() };
         let show = |o: &Option<String>, missing: &str| o.as_deref().map(label).unwrap_or_else(|| missing.to_string());
         vec![
-            ("RDP (Windows)", "Remote Desktop ActiveX control of mstsc.exe – used for RDP in tabs".into()),
-            ("RDP fallback (FreeRDP)", self.freerdp.as_ref().map(|(p, v)| format!("{} – v{v}", label(p))).unwrap_or_else(|| "not found – install FreeRDP or use the full RC Manager package".into())),
+            ("RDP (FreeRDP)", self.freerdp.as_ref().map(|(p, v)| format!("{} – v{v}", label(p))).unwrap_or_else(|| "not found – install FreeRDP or use the full RC Manager package".into())),
             ("SSH (PuTTY)", show(&self.putty, "not found – SSH opens Windows' ssh in a console window")),
             ("VNC (TigerVNC)", show(&self.vncviewer, "not found – install the TigerVNC viewer")),
             ("Browser", self.opener.as_deref().map(|p| format!("default browser (opened via {p})")).unwrap_or_else(|| "not found".into())),
@@ -988,8 +987,8 @@ pub enum Event {
     Output { session: u64, line: String },
     /// The client waits for an answer on stdin (e.g. FreeRDP's certificate question).
     Prompt { session: u64, text: String },
-    /// The session ended; `reason` explains why when the client says so (ActiveX control).
-    Exited { session: u64, code: Option<i32>, reason: Option<String> },
+    /// The session ended.
+    Exited { session: u64, code: Option<i32> },
 }
 
 /// A started client.
@@ -1199,7 +1198,7 @@ pub fn spawn(plan: &Plan, session: u64, events: Sender<Event>, wake: impl Fn() +
         for dir in &private_dirs {
             std::fs::remove_dir_all(dir).ok();
         }
-        events.send(Event::Exited { session, code, reason: None }).ok();
+        events.send(Event::Exited { session, code }).ok();
         wake();
     });
     Ok(Spawned { pid, stdin })

@@ -13,7 +13,6 @@ mod launch;
 mod legacy;
 mod model;
 mod net;
-mod rdpax;
 mod store;
 mod theme;
 mod update;
