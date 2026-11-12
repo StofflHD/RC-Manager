@@ -47,6 +47,34 @@ mod imp {
     use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
     use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, GetClientRect, WS_CHILD, WS_CLIPCHILDREN, WS_VISIBLE};
 
+    thread_local! {
+        /// The controls of the UI thread: their ATL host window and their in-place object.
+        static CONTROLS: std::cell::RefCell<Vec<(HWND, IOleInPlaceActiveObject)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Message hook of the UI thread: hands keyboard messages for a control to its
+    /// `TranslateAccelerator` first, as WinForms does for an ActiveX control (PreProcessMessage);
+    /// a message the control takes is not processed any further.
+    unsafe extern "system" fn message_hook(code: i32, wparam: usize, lparam: isize) -> isize {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{CallNextHookEx, IsChild, HC_ACTION, MSG, PM_REMOVE, WM_KEYFIRST, WM_KEYLAST, WM_NULL};
+        if code == HC_ACTION as i32 && wparam == PM_REMOVE as usize {
+            let msg = &mut *(lparam as *mut MSG);
+            if (WM_KEYFIRST..=WM_KEYLAST).contains(&msg.message) && !msg.hwnd.is_null() {
+                let object = CONTROLS.with(|c| c.borrow().iter().find(|(w, _)| *w == msg.hwnd || IsChild(*w, msg.hwnd) != 0).map(|(_, o)| o.clone()));
+                if let Some(o) = object {
+                    let result = (Interface::vtable(&o).TranslateAccelerator)(Interface::as_raw(&o), msg as *const MSG as *const _);
+                    if std::env::var_os("RC_MANAGER_DEBUG_KEYS").is_some() && matches!(msg.wParam, 0x5B | 0x5C | 0x09 | 0x52) {
+                        eprintln!("keys: TranslateAccelerator msg {:X} key {:X}: {:?}", msg.message, msg.wParam, result);
+                    }
+                    if result.0 == 0 {
+                        msg.message = WM_NULL;
+                    }
+                }
+            }
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
     /// ProgIDs of the control, newest first ("not safe for scripting": the password may be set).
     const PROGIDS: [&str; 6] = ["MsTscAx.MsTscAx.13", "MsTscAx.MsTscAx.12", "MsTscAx.MsTscAx.11", "MsTscAx.MsTscAx.10", "MsTscAx.MsTscAx.9", "MsTscAx.MsTscAx.8"];
 
@@ -221,6 +249,14 @@ mod imp {
                     // On an error, dropping `ax` closes the control's window again.
                     ax.dynamic.set(ax.setup(conn, cred, size.0, size.1)?);
                     ax.client.call("Connect", Vec::new())?;
+                    if let Ok(o) = ax.client.0.cast::<IOleInPlaceActiveObject>() {
+                        CONTROLS.with(|c| c.borrow_mut().push((ax.window, o)));
+                        thread_local!(static HOOKED: Cell<bool> = const { Cell::new(false) });
+                        if !HOOKED.with(|h| h.replace(true)) {
+                            use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, WH_GETMESSAGE};
+                            SetWindowsHookExW(WH_GETMESSAGE, Some(message_hook), std::ptr::null_mut(), windows_sys::Win32::System::Threading::GetCurrentThreadId());
+                        }
+                    }
                     return Ok(ax);
                 }
                 Err(last)
@@ -430,6 +466,7 @@ mod imp {
 
     impl Drop for RdpAx {
         fn drop(&mut self) {
+            CONTROLS.with(|c| c.borrow_mut().retain(|(w, _)| *w != self.window));
             unsafe { DestroyWindow(self.window) };
         }
     }
