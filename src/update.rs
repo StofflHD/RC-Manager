@@ -262,12 +262,15 @@ fn ps_quote(p: &Path) -> String {
 fn install_windows(rel: &Release, exe: &Path, proxy: &str) -> Result<PathBuf, String> {
     let (name, url, _) = rel.package.as_ref().ok_or_else(|| "The release has no Windows package for this installation.".to_string())?;
     let dir = exe.parent().ok_or("no program directory")?;
-    let work = std::env::temp_dir().join(format!("rc-manager-update-{}", rel.version));
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    // A folder of its own per attempt: one left by an earlier attempt may still be in use
+    // (a virus scanner checking the installer), and Windows then denies creating it again.
+    let tag = format!("{}-{}-{}", rel.version, std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0));
+    cleanup_old_updates();
+    let work = std::env::temp_dir().join(format!("rc-manager-update-{tag}"));
+    std::fs::create_dir_all(&work).map_err(|e| format!("Creating {}: {e}", work.display()))?;
     let file = work.join(name);
     http(url, proxy, Some(&file))?;
-    let data = std::fs::read(&file).map_err(|e| e.to_string())?;
+    let data = std::fs::read(&file).map_err(|e| format!("Reading {}: {e}", file.display()))?;
     verify(rel, &data, proxy)?;
     let mut script = String::from("param([switch]$Restart)\n");
     script += &format!("Wait-Process -Id {} -ErrorAction SilentlyContinue\n", std::process::id());
@@ -279,7 +282,7 @@ fn install_windows(rel: &Release, exe: &Path, proxy: &str) -> Result<PathBuf, St
         // The ZIP holds no `data` folder, so the user's data stays untouched.
         let staging = work.join("files");
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&data)).map_err(|e| format!("ZIP: {e}"))?;
-        zip.extract(&staging).map_err(|e| format!("ZIP: {e}"))?;
+        zip.extract(&staging).map_err(|e| format!("Unpacking into {}: {e}", staging.display()))?;
         if !staging.join("rc-manager.exe").is_file() {
             return Err("The ZIP archive contains no rc-manager.exe.".into());
         }
@@ -296,9 +299,21 @@ fn install_windows(rel: &Release, exe: &Path, proxy: &str) -> Result<PathBuf, St
     }
     script += &format!("if ($Restart) {{ Start-Process -FilePath {} }}\n", ps_quote(exe));
     script += &format!("Remove-Item -Path {} -Recurse -Force -ErrorAction SilentlyContinue\n", ps_quote(&work));
-    let path = std::env::temp_dir().join(format!("rc-manager-update-{}.ps1", rel.version));
-    std::fs::write(&path, script).map_err(|e| e.to_string())?;
+    let path = std::env::temp_dir().join(format!("rc-manager-update-{tag}.ps1"));
+    std::fs::write(&path, script).map_err(|e| format!("Writing {}: {e}", path.display()))?;
     Ok(path)
+}
+
+/// Removes what earlier update attempts left in the temp folder (best effort: whatever is still
+/// in use stays until the next attempt).
+fn cleanup_old_updates() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for e in entries.flatten() {
+        if e.file_name().to_string_lossy().starts_with("rc-manager-update-") {
+            let p = e.path();
+            let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        }
+    }
 }
 
 pub fn spawn_install(rel: Release, target: PathBuf, proxy: String, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
