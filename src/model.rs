@@ -368,12 +368,52 @@ pub struct Folder {
     /// sub-folders that inherit their settings.
     #[serde(default)]
     pub profiles: Vec<Uuid>,
+    /// Colour of the folder's symbol and name in the tree (sRGB); `None`: the theme's.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    /// Symbol of the folder in the tree: that of a connection type, or `None` for a folder.
+    #[serde(default)]
+    pub icon: Option<Protocol>,
 }
 
 impl Folder {
+    /// Colours offered for folders (a custom one can be picked as well).
+    pub const COLORS: [[u8; 3]; 10] = [
+        [0xE5, 0x48, 0x4D],
+        [0xF0, 0x8C, 0x00],
+        [0xE0, 0xB4, 0x00],
+        [0x3F, 0xA3, 0x4D],
+        [0x00, 0x9E, 0x9E],
+        [0x1E, 0x88, 0xE5],
+        [0x5C, 0x6B, 0xC0],
+        [0x9C, 0x4D, 0xCC],
+        [0xD8, 0x1B, 0x60],
+        [0x8D, 0x6E, 0x63],
+    ];
+
     pub fn new(name: &str, parent: Option<Uuid>) -> Self {
         let credential = if parent.is_some() { CredentialRef::Inherit } else { CredentialRef::None };
-        Self { id: Uuid::new_v4(), parent, name: name.into(), description: String::new(), sorting: 0, expanded: true, credential, profiles: Vec::new() }
+        Self {
+            id: Uuid::new_v4(),
+            parent,
+            name: name.into(),
+            description: String::new(),
+            sorting: 0,
+            expanded: true,
+            credential,
+            profiles: Vec::new(),
+            color: None,
+            icon: None,
+        }
+    }
+
+    /// The symbol shown in the tree: the chosen connection type's, or an open/closed folder.
+    pub fn symbol(&self, open: bool) -> &'static str {
+        match self.icon {
+            Some(p) => p.icon(),
+            None if open => "🗁",
+            None => "🗀",
+        }
     }
 }
 

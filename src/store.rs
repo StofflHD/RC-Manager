@@ -204,6 +204,8 @@ impl Store {
         db.pragma_update(None, "foreign_keys", "ON")?;
         db.execute_batch(SCHEMA)?;
         add_column(&db, "folders", "profiles", "TEXT NOT NULL DEFAULT '[]'")?;
+        add_column(&db, "folders", "color", "TEXT NOT NULL DEFAULT ''")?;
+        add_column(&db, "folders", "icon", "TEXT NOT NULL DEFAULT ''")?;
         add_column(&db, "connections", "settings", "TEXT NOT NULL DEFAULT 'own'")?;
         Ok(Self { db, dir: dir.to_path_buf(), vault: None })
     }
@@ -307,7 +309,7 @@ impl Store {
     }
 
     fn load_folders(&self) -> Result<Vec<Folder>> {
-        let mut stmt = self.db.prepare("SELECT id, parent, name, description, sorting, expanded, credential, profiles FROM folders")?;
+        let mut stmt = self.db.prepare("SELECT id, parent, name, description, sorting, expanded, credential, profiles, color, icon FROM folders")?;
         let rows = stmt.query_map([], |r| {
             let parent = uuid_opt(r.get(1)?);
             // The column held a bare UUID or NULL before folders used a CredentialRef. A NULL
@@ -327,6 +329,8 @@ impl Store {
                 expanded: r.get::<_, i64>(5)? != 0,
                 credential,
                 profiles: serde_json::from_str(&r.get::<_, String>(7)?).unwrap_or_default(),
+                color: color_from_str(&r.get::<_, String>(8)?),
+                icon: Protocol::from_key(&r.get::<_, String>(9)?),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -407,7 +411,7 @@ impl Store {
 
     pub fn save_folder(&self, f: &Folder) -> Result<()> {
         self.db.execute(
-            "INSERT OR REPLACE INTO folders (id, parent, name, description, sorting, expanded, credential, profiles) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR REPLACE INTO folders (id, parent, name, description, sorting, expanded, credential, profiles, color, icon) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 f.id.to_string(),
                 f.parent.map(|p| p.to_string()),
@@ -416,7 +420,9 @@ impl Store {
                 f.sorting,
                 f.expanded as i64,
                 cred_ref_to_str(f.credential),
-                serde_json::to_string(&f.profiles)?
+                serde_json::to_string(&f.profiles)?,
+                f.color.map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}")).unwrap_or_default(),
+                f.icon.map(|p| p.key()).unwrap_or_default()
             ],
         )?;
         Ok(())
@@ -508,6 +514,13 @@ impl Store {
     }
 }
 
+/// A folder colour as stored: `#rrggbb`, or empty for none.
+fn color_from_str(s: &str) -> Option<[u8; 3]> {
+    let h = s.strip_prefix('#').filter(|h| h.len() == 6)?;
+    let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +552,28 @@ mod tests {
         assert!(!dir.join("rdp-manager.db3").exists());
         drop(s);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn folder_colour_and_symbol_are_stored() {
+        let dir = temp_dir("folder-style");
+        let mut f = Folder::new("Linux", None);
+        f.color = Some([0x1E, 0x88, 0xE5]);
+        f.icon = Some(Protocol::Ssh);
+        let plain = Folder::new("Plain", None);
+        {
+            let mut s = Store::open(&dir).unwrap();
+            s.unlock(None).unwrap();
+            s.save_folder(&f).unwrap();
+            s.save_folder(&plain).unwrap();
+        }
+        let mut s = Store::open(&dir).unwrap();
+        s.unlock(None).unwrap();
+        let mut d = s.load().unwrap().folders;
+        d.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(d, vec![f, plain]);
+        assert_eq!(color_from_str("#zz0000"), None);
+        assert_eq!(color_from_str(""), None);
     }
 
     #[test]

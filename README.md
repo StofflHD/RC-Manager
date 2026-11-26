@@ -19,6 +19,7 @@ then keeps the active sessions and a counter of new warnings visible.
 | Feature | Original (Windows) | RC Manager (Linux and Windows) |
 |---|---|---|
 | Folder tree, search, sort order | ✔ | ✔ |
+| Folder colours and symbols | ✔ | ✔ a colour and the symbol of a connection type per folder (*Properties*); colours are imported |
 | Sessions as tabs, scaled with the window | ✔ | ✔ (Linux: X11/XWayland) |
 | RDP | embedded MSTSC ActiveX | FreeRDP 3 in the tab (Linux: drawn into the tab; Windows: `wfreerdp` moved into the tab); remote resolution follows the tab or the desktop is scaled |
 | RDP options | display, experience, sound, key combinations, redirections, NLA, server authentication, TS gateway, start program, keyboard layout | the same except ports and Plug and Play devices; RemoteApp in addition |

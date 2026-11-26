@@ -267,7 +267,8 @@ impl App {
             egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
                 match &mut editor {
                     Editor::Folder(f) => {
-                        ui.heading(RichText::new(format!("🗀 {}", f.name)).color(theme::accent(ui.visuals().dark_mode)));
+                        let color = f.color.map(|[r, g, b]| egui::Color32::from_rgb(r, g, b)).unwrap_or(theme::accent(ui.visuals().dark_mode));
+                        ui.heading(RichText::new(format!("{} {}", f.symbol(false), f.name)).color(color));
                         ui.add_space(8.0);
                         let choices = self.folder_choices(Some(f.id));
                         egui::Grid::new("folder_grid").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -276,6 +277,12 @@ impl App {
                             ui.end_row();
                             ui.label("Parent folder");
                             Self::folder_combo(ui, "folder_parent", &mut f.parent, &choices);
+                            ui.end_row();
+                            ui.label("Symbol");
+                            Self::folder_icon_combo(ui, f);
+                            ui.end_row();
+                            ui.label("Colour");
+                            Self::folder_color_choice(ui, f);
                             ui.end_row();
                             ui.label("Credentials for\nconnections inside");
                             // A nested folder may inherit the set from its parent folder.

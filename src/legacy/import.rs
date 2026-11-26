@@ -296,6 +296,9 @@ fn import_inner(copy: &Path, disable_show_pw: Option<&str>, app_password: Option
                     .filter(|s| profile_ids.contains(*s))
                     .filter_map(|s| Uuid::parse_str(s).ok())
                     .collect(),
+                // .NET ARGB; 0 (transparent black) means none.
+                color: get(r, "color").parse::<i64>().ok().filter(|v| *v != 0).map(|v| [(v >> 16) as u8, (v >> 8) as u8, v as u8]),
+                icon: None,
             })
         })
         .collect();

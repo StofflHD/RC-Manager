@@ -43,6 +43,48 @@ impl App {
         }
     }
 
+    /// Symbol of a folder in the tree: a folder, or the symbol of a connection type.
+    pub(super) fn folder_icon_combo(ui: &mut egui::Ui, f: &mut Folder) {
+        let label = |icon: Option<Protocol>| match icon {
+            Some(p) => format!("{} {}", p.icon(), p.label()),
+            None => "🗀 Folder".to_string(),
+        };
+        egui::ComboBox::from_id_salt("folder_icon").selected_text(label(f.icon)).width(200.0).show_ui(ui, |ui| {
+            ui.selectable_value(&mut f.icon, None, label(None));
+            for p in Protocol::ALL {
+                ui.selectable_value(&mut f.icon, Some(p), label(Some(p)));
+            }
+        });
+    }
+
+    /// Colour of a folder: none (the theme's), one of the offered colours, or a custom one.
+    pub(super) fn folder_color_choice(ui: &mut egui::Ui, f: &mut Folder) {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            if ui.selectable_label(f.color.is_none(), "None").on_hover_text("The theme's colour").clicked() {
+                f.color = None;
+            }
+            let size = egui::vec2(18.0, 18.0);
+            for c in Folder::COLORS {
+                let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+                let fill = egui::Color32::from_rgb(c[0], c[1], c[2]);
+                ui.painter().rect_filled(rect.shrink(2.0), 3.0_f32, fill);
+                if f.color == Some(c) {
+                    ui.painter().rect_stroke(rect, 3.0_f32, egui::Stroke::new(2.0_f32, ui.visuals().strong_text_color()));
+                } else if resp.hovered() {
+                    ui.painter().rect_stroke(rect, 3.0_f32, egui::Stroke::new(1.0_f32, ui.visuals().text_color()));
+                }
+                if resp.clicked() {
+                    f.color = Some(c);
+                }
+            }
+            let mut custom = f.color.unwrap_or([0x80, 0x80, 0x80]);
+            if ui.color_edit_button_srgb(&mut custom).on_hover_text("Custom colour").changed() {
+                f.color = Some(custom);
+            }
+        });
+    }
+
     /// Settings choice of a connection: its own, the folder's profile, or a profile.
     pub(super) fn settings_combo(ui: &mut egui::Ui, c: &mut Connection, profiles: &[SettingsProfile], inherited: Option<&SettingsProfile>) {
         let inherit = match inherited {
