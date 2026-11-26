@@ -213,7 +213,11 @@ impl App {
             let selected = self.selection == Some(Sel::Folder(f.id));
             state
                 .show_header(ui, |ui| {
-                    let r = ui.push_id(f.id, |ui| ui.selectable_label(selected, format!("{} {}", if f.expanded { "🗁" } else { "🗀" }, f.name))).inner;
+                    let mut text = RichText::new(format!("{} {}", f.symbol(f.expanded), f.name));
+                    if let Some([r, g, b]) = f.color {
+                        text = text.color(egui::Color32::from_rgb(r, g, b));
+                    }
+                    let r = ui.push_id(f.id, |ui| ui.selectable_label(selected, text)).inner;
                     let r = if dnd.enabled { r.interact(egui::Sense::click_and_drag()) } else { r };
                     if dnd.enabled {
                         if r.dragged() {
