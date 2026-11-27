@@ -49,6 +49,8 @@ struct Settings {
     update_skip: String,
     /// Offer "Add to Application Menu" when started from an AppImage that is not installed.
     install_prompt: bool,
+    /// Height of the session tab strip (points) as last drawn; 0 = not drawn yet.
+    tab_strip_height: f32,
     /// Connections whose sessions were open at the last exit, offered for reopening at start.
     reopen: Vec<Uuid>,
 }
@@ -67,6 +69,7 @@ impl Default for Settings {
             update_last_check: 0,
             update_skip: String::new(),
             install_prompt: true,
+            tab_strip_height: 0.0,
             reopen: Vec::new(),
         }
     }
@@ -468,6 +471,8 @@ pub struct App {
     reach: Option<Reachability>,
     /// Central area of the active session tab (points), set while drawing.
     session_rect: Option<egui::Rect>,
+    /// Central area below the menu and toolbar (points), before the tab strip; set while drawing.
+    central_rect: Option<egui::Rect>,
     /// Session that has the keyboard focus.
     session_focus: Option<u64>,
     /// Last time the focus was handed back to a session (see `has_focus`).
@@ -677,6 +682,7 @@ impl App {
             pending_update: None,
             reach: None,
             session_rect: None,
+            central_rect: None,
             session_focus: None,
             focus_checked: Instant::now(),
             unlock: None,
@@ -1256,10 +1262,18 @@ impl App {
                 return None;
             }
         };
-        // Size of the session area: the last one drawn, or the central panel's.
+        // Size of the session area: the last one drawn or, without one, the central area less
+        // the tab strip that appears with the new tab. A remote desktop started larger than the
+        // tab only shrinks once its display channel is up, which can be missed: its bottom (the
+        // taskbar) then lies outside the tab.
         let ppp = self.ctx.pixels_per_point();
-        let rect = self.session_rect.unwrap_or_else(|| self.ctx.available_rect());
-        let (width, height) = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
+        let rect = self.session_rect.unwrap_or_else(|| {
+            let mut r = self.central_rect.unwrap_or_else(|| self.ctx.available_rect());
+            r.min.y = (r.min.y + self.tab_strip_estimate()).min(r.max.y);
+            r
+        });
+        // Rounded like the tab placement, so both agree to the pixel.
+        let (width, height) = ((rect.width() * ppp).round().max(1.0) as u32, (rect.height() * ppp).round().max(1.0) as u32);
         // Size the host to the tab area *before* the client starts: an embedded terminal (xterm)
         // then opens at the right number of rows/columns at once, instead of the 64×64 default.
         // A remote pager reads the terminal size only at login, so a late resize would leave it
@@ -1825,7 +1839,7 @@ impl App {
             // A new (or reconnected) RDP session can only follow the tab size once its display
             // channel is up, so the size is also repeated while it connects; wfreerdp ignores it
             // when nothing changed.
-            let connecting = geom.4 && tab.opened.elapsed() < Duration::from_secs(30) && tab.size_told.elapsed() > Duration::from_secs(2);
+            let connecting = geom.4 && tab.opened.elapsed() < Duration::from_secs(60) && tab.size_told.elapsed() > Duration::from_secs(2);
             if tab.resized.is_some_and(|t| t.elapsed() > Duration::from_millis(400)) || connecting {
                 emb.resized(tab.host);
                 tab.resized = None;

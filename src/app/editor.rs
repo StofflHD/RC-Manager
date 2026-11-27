@@ -35,9 +35,12 @@ impl App {
     pub(super) fn ui_editor(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.session_rect = None;
+            self.central_rect = Some(ui.available_rect_before_wrap());
             if !self.tabs.is_empty() {
+                let top = ui.cursor().top();
                 self.tab_strip(ui, actions);
                 ui.add_space(2.0);
+                self.s.tab_strip_height = ui.cursor().top() - top;
             }
             if !self.active_tab.is_some_and(|id| self.tabs.iter().any(|t| t.session == id)) {
                 self.active_tab = self.tabs.first().map(|t| t.session);
@@ -53,6 +56,17 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Height the tab strip takes above the session area: as last drawn, or estimated from the
+    /// style (a tab: button text plus 4 points padding above and below, the spacing and 2 points).
+    pub(super) fn tab_strip_estimate(&self) -> f32 {
+        if self.s.tab_strip_height > 0.0 {
+            return self.s.tab_strip_height;
+        }
+        let style = self.ctx.style();
+        let row = self.ctx.fonts(|f| f.row_height(&egui::TextStyle::Button.resolve(&style)));
+        row + 8.0 + style.spacing.item_spacing.y + 2.0
     }
 
     pub(super) fn tab_strip(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
